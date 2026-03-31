@@ -6,7 +6,7 @@
 |----------|-------------------|----------------------|
 | **Warp Size** | **32** | **64** ⚠️ CRITICAL |
 | SM Count | 128 | 104 |
-| Global Memory | 25.25 GB | 68.28 GB |
+| Global Memory | 24 GB | 64 GB |
 | Memory Bus Width | 384 bits | 4096 bits |
 | Peak Bandwidth | 1008.10 GB/s | 1843.20 GB/s |
 | GPU Clock | 2520 MHz | 1600 MHz |

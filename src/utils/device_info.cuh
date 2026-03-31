@@ -121,6 +121,11 @@ inline double calculatePeakMemoryBandwidth(int memoryBusWidth, int memoryClockRa
 bool hasTensorCoreSupport(int computeMajor, int computeMinor);
 
 /**
+ * @brief Get FP32 cores per SM based on compute capability
+ */
+int getFP32CoresPerSM(int major, int minor);
+
+/**
  * @brief Get Tensor Core peak FLOPS for device
  */
 double getTensorCorePeakFlops(int computeMajor, int computeMinor, int gpuClockRate, int smCount);
