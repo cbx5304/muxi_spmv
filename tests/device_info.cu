@@ -2,19 +2,17 @@
  * @file device_info.cu
  * @brief Standalone GPU device information query tool
  *
- * Run this on both remote servers to collect GPU hardware information
- * for documentation and performance optimization planning.
+ * Compatible with CUDA 11.x through CUDA 13.x and domestic GPUs
+ * Note: Does not use CUDA_VERSION macro for domestic GPU compatibility
  */
 
 #include <cuda_runtime.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <fstream>
-#include <sstream>
 
 // Structure to hold device properties
-struct DeviceInfoExtended {
+struct DeviceInfo {
     int deviceId;
     char name[256];
     int major, minor;
@@ -28,10 +26,10 @@ struct DeviceInfoExtended {
     int regsPerSM;
     size_t sharedMemPerBlock;
     size_t sharedMemPerSM;
-    int maxSharedMemPerBlockOptin;
+    size_t sharedMemPerBlockOptin;
     int memoryBusWidth;
-    int memoryClockRate;
-    int gpuClockRate;
+    int memoryClockRate;    // in kHz
+    int gpuClockRate;       // in kHz
     int multiProcessorCount;
     int maxThreadsDim[3];
     int maxGridSize[3];
@@ -39,22 +37,21 @@ struct DeviceInfoExtended {
     int asyncEngineCount;
     int l2CacheSize;
     int persistingL2CacheMaxSize;
-    int singleToDoublePrecisionPerfRatio;
     int managedMemory;
-    int computePreemption;
-    int canAccessPeer;
 };
 
 // Get FP32 cores per SM based on architecture
 int getFP32CoresPerSM(int major, int minor) {
-    if (major == 2) return minor == 0 ? 32 : 48;
-    if (major == 3) return 192;
-    if (major == 5) return 128;
-    if (major == 6) return minor == 0 ? 64 : 128;
-    if (major == 7) return 64;
-    if (major == 8) return minor == 0 ? 64 : 128;
-    if (major == 9) return 128;
-    return 128;
+    switch (major) {
+        case 2: return minor == 0 ? 32 : 48;      // Fermi
+        case 3: return 192;                        // Kepler
+        case 5: return 128;                        // Maxwell
+        case 6: return minor == 0 ? 64 : 128;     // Pascal
+        case 7: return 64;                         // Volta, Turing
+        case 8: return minor == 0 ? 64 : 128;     // Ampere
+        case 9: return 128;                        // Hopper, Ada
+        default: return 128;
+    }
 }
 
 // Check Tensor Core support
@@ -63,17 +60,17 @@ bool hasTensorCore(int major, int minor) {
 }
 
 // Calculate peak memory bandwidth (GB/s)
-double calcPeakBandwidth(int busWidth, int memClock) {
-    return (double)busWidth * (double)memClock * 2.0 / 8.0 / 1e6;
+double calcPeakBandwidth(int busWidth, int memClockKHz) {
+    return (double)busWidth * (double)memClockKHz * 2.0 / 8.0 / 1e6;
 }
 
 // Calculate peak FLOPS
-double calcPeakFlops(int smCount, int coresPerSM, int gpuClock) {
-    return (double)smCount * coresPerSM * (double)gpuClock * 2.0 * 1e6;
+double calcPeakFlops(int smCount, int coresPerSM, int gpuClockKHz) {
+    return (double)smCount * coresPerSM * (double)gpuClockKHz * 2.0 * 1e6;
 }
 
-DeviceInfoExtended getDeviceInfo(int deviceId) {
-    DeviceInfoExtended info;
+DeviceInfo getDeviceInfo(int deviceId) {
+    DeviceInfo info;
     memset(&info, 0, sizeof(info));
 
     cudaDeviceProp prop;
@@ -100,10 +97,8 @@ DeviceInfoExtended getDeviceInfo(int deviceId) {
     info.regsPerSM = prop.regsPerMultiprocessor;
     info.sharedMemPerBlock = prop.sharedMemPerBlock;
     info.sharedMemPerSM = prop.sharedMemPerMultiprocessor;
-    info.maxSharedMemPerBlockOptin = prop.sharedMemPerBlockOptin;
+    info.sharedMemPerBlockOptin = prop.sharedMemPerBlockOptin;
     info.memoryBusWidth = prop.memoryBusWidth;
-    info.memoryClockRate = prop.memoryClockRate;
-    info.gpuClockRate = prop.clockRate;
     info.multiProcessorCount = prop.multiProcessorCount;
     info.maxThreadsDim[0] = prop.maxThreadsDim[0];
     info.maxThreadsDim[1] = prop.maxThreadsDim[1];
@@ -115,15 +110,19 @@ DeviceInfoExtended getDeviceInfo(int deviceId) {
     info.asyncEngineCount = prop.asyncEngineCount;
     info.l2CacheSize = prop.l2CacheSize;
     info.persistingL2CacheMaxSize = prop.persistingL2CacheMaxSize;
-    info.singleToDoublePrecisionPerfRatio = prop.singleToDoublePrecisionPerfRatio;
     info.managedMemory = prop.managedMemory;
-    info.computePreemption = prop.computePreemption;
-    info.canAccessPeer = prop.canAccessPeer;
+
+    // Get clock rates via device attributes (works across CUDA versions)
+    int clockRate = 0, memClockRate = 0;
+    cudaDeviceGetAttribute(&clockRate, cudaDevAttrClockRate, deviceId);
+    cudaDeviceGetAttribute(&memClockRate, cudaDevAttrMemoryClockRate, deviceId);
+    info.gpuClockRate = clockRate;
+    info.memoryClockRate = memClockRate;
 
     return info;
 }
 
-void printConsole(const DeviceInfoExtended& info) {
+void printConsole(const DeviceInfo& info) {
     printf("\n");
     printf("============================================\n");
     printf("  GPU Device: %s\n", info.name);
@@ -141,9 +140,9 @@ void printConsole(const DeviceInfoExtended& info) {
     printf("  Peak Bandwidth:         %.2f GB/s\n",
            calcPeakBandwidth(info.memoryBusWidth, info.memoryClockRate));
 
-    printf("\n[Execution Resources]\n");
+    printf("\n[Execution Resources - CRITICAL for SpMV]\n");
     printf("  SM Count:               %d\n", info.multiProcessorCount);
-    printf("  Warp Size:              %d  <- IMPORTANT for kernel design\n", info.warpSize);
+    printf("  Warp Size:              %d  <- IMPORTANT!\n", info.warpSize);
     printf("  Max Threads/Block:      %d\n", info.maxThreadsPerBlock);
     printf("  Max Threads/SM:         %d\n", info.maxThreadsPerSM);
     printf("  Max Blocks/SM:          %d\n", info.maxBlocksPerSM);
@@ -153,7 +152,7 @@ void printConsole(const DeviceInfoExtended& info) {
     printf("  Registers/SM:           %d\n", info.regsPerSM);
     printf("  Shared Mem/Block:       %.2f KB\n", (double)info.sharedMemPerBlock / 1024);
     printf("  Shared Mem/SM:          %.2f KB\n", (double)info.sharedMemPerSM / 1024);
-    printf("  Max Shared (Opt-in):    %.2f KB\n", (double)info.maxSharedMemPerBlockOptin / 1024);
+    printf("  Max Shared (Opt-in):    %.2f KB\n", (double)info.sharedMemPerBlockOptin / 1024);
 
     printf("\n[Performance]\n");
     printf("  GPU Clock:              %d MHz\n", info.gpuClockRate / 1000);
@@ -161,10 +160,6 @@ void printConsole(const DeviceInfoExtended& info) {
     double peakFlops = calcPeakFlops(info.multiProcessorCount, coresPerSM, info.gpuClockRate);
     printf("  FP32 Cores/SM:          %d\n", coresPerSM);
     printf("  Peak FP32 FLOPS:        %.2f TFLOPS\n", peakFlops / 1e12);
-    double dpRatio = info.singleToDoublePrecisionPerfRatio > 0 ?
-                     1.0 / info.singleToDoublePrecisionPerfRatio : 1.0 / 32.0;
-    printf("  Peak FP64 FLOPS:        %.2f TFLOPS\n", peakFlops * dpRatio / 1e12);
-    printf("  SP/DP Ratio:            %d:1\n", info.singleToDoublePrecisionPerfRatio);
     printf("  Tensor Core:            %s\n", hasTensorCore(info.major, info.minor) ? "Yes" : "No");
 
     printf("\n[Cache & Other]\n");
@@ -181,118 +176,113 @@ void printConsole(const DeviceInfoExtended& info) {
     printf("\n============================================\n");
 }
 
-void writeMarkdownFile(const DeviceInfoExtended& info, const char* filename) {
-    std::ofstream file(filename);
-    if (!file.is_open()) {
+void writeMarkdown(const DeviceInfo& info, const char* filename) {
+    FILE* file = fopen(filename, "w");
+    if (!file) {
         printf("Error: Cannot open file %s for writing\n", filename);
         return;
     }
 
-    file << "# GPU Hardware Information\n\n";
-    file << "Device: " << info.name << "\n\n";
-    file << "Generated: " << __DATE__ << " " << __TIME__ << "\n\n";
+    fprintf(file, "# GPU Hardware Information\n\n");
+    fprintf(file, "**Device:** %s\n\n", info.name);
+    fprintf(file, "**Generated:** %s %s\n\n", __DATE__, __TIME__);
 
-    file << "## Basic Information\n\n";
-    file << "| Property | Value |\n";
-    file << "|----------|-------|\n";
-    file << "| Device ID | " << info.deviceId << " |\n";
-    file << "| Device Name | " << info.name << " |\n";
-    file << "| Compute Capability | " << info.major << "." << info.minor << " |\n";
+    fprintf(file, "## Basic Information\n\n");
+    fprintf(file, "| Property | Value |\n");
+    fprintf(file, "|----------|-------|\n");
+    fprintf(file, "| Device ID | %d |\n", info.deviceId);
+    fprintf(file, "| Device Name | %s |\n", info.name);
+    fprintf(file, "| Compute Capability | %d.%d |\n", info.major, info.minor);
 
-    file << "\n## Memory Specifications\n\n";
-    file << "| Property | Value |\n";
-    file << "|----------|-------|\n";
-    file << "| Global Memory | " << (double)info.totalGlobalMem / 1e9 << " GB |\n";
-    file << "| Constant Memory | " << (double)info.totalConstMem / 1024 << " KB |\n";
-    file << "| Memory Bus Width | " << info.memoryBusWidth << " bits |\n";
-    file << "| Memory Clock Rate | " << info.memoryClockRate / 1000 << " MHz |\n";
+    fprintf(file, "\n## Memory Specifications\n\n");
+    fprintf(file, "| Property | Value |\n");
+    fprintf(file, "|----------|-------|\n");
+    fprintf(file, "| Global Memory | %.2f GB |\n", (double)info.totalGlobalMem / 1e9);
+    fprintf(file, "| Constant Memory | %.2f KB |\n", (double)info.totalConstMem / 1024);
+    fprintf(file, "| Memory Bus Width | %d bits |\n", info.memoryBusWidth);
+    fprintf(file, "| Memory Clock Rate | %d MHz |\n", info.memoryClockRate / 1000);
     double bandwidth = calcPeakBandwidth(info.memoryBusWidth, info.memoryClockRate);
-    file << "| Peak Memory Bandwidth | " << bandwidth << " GB/s |\n";
+    fprintf(file, "| Peak Memory Bandwidth | %.2f GB/s |\n", bandwidth);
 
-    file << "\n## Execution Resources\n\n";
-    file << "| Property | Value |\n";
-    file << "|----------|-------|\n";
-    file << "| SM Count | " << info.multiProcessorCount << " |\n";
-    file << "| Warp Size | " << info.warpSize << " |\n";
-    file << "| Max Threads/Block | " << info.maxThreadsPerBlock << " |\n";
-    file << "| Max Threads/SM | " << info.maxThreadsPerSM << " |\n";
-    file << "| Max Blocks/SM | " << info.maxBlocksPerSM << " |\n";
+    fprintf(file, "\n## Execution Resources\n\n");
+    fprintf(file, "| Property | Value |\n");
+    fprintf(file, "|----------|-------|\n");
+    fprintf(file, "| SM Count | %d |\n", info.multiProcessorCount);
+    fprintf(file, "| Warp Size | %d |\n", info.warpSize);
+    fprintf(file, "| Max Threads/Block | %d |\n", info.maxThreadsPerBlock);
+    fprintf(file, "| Max Threads/SM | %d |\n", info.maxThreadsPerSM);
+    fprintf(file, "| Max Blocks/SM | %d |\n", info.maxBlocksPerSM);
 
-    file << "\n## Register & Shared Memory\n\n";
-    file << "| Property | Value |\n";
-    file << "|----------|-------|\n";
-    file << "| Registers/Block | " << info.regsPerBlock << " |\n";
-    file << "| Registers/SM | " << info.regsPerSM << " |\n";
-    file << "| Shared Memory/Block | " << (double)info.sharedMemPerBlock / 1024 << " KB |\n";
-    file << "| Shared Memory/SM | " << (double)info.sharedMemPerSM / 1024 << " KB |\n";
-    file << "| Max Shared Memory (Opt-in) | " << (double)info.maxSharedMemPerBlockOptin / 1024 << " KB |\n";
+    fprintf(file, "\n## Register & Shared Memory\n\n");
+    fprintf(file, "| Property | Value |\n");
+    fprintf(file, "|----------|-------|\n");
+    fprintf(file, "| Registers/Block | %d |\n", info.regsPerBlock);
+    fprintf(file, "| Registers/SM | %d |\n", info.regsPerSM);
+    fprintf(file, "| Shared Memory/Block | %.2f KB |\n", (double)info.sharedMemPerBlock / 1024);
+    fprintf(file, "| Shared Memory/SM | %.2f KB |\n", (double)info.sharedMemPerSM / 1024);
+    fprintf(file, "| Max Shared Memory (Opt-in) | %.2f KB |\n", (double)info.sharedMemPerBlockOptin / 1024);
 
-    file << "\n## Performance Metrics\n\n";
-    file << "| Property | Value |\n";
-    file << "|----------|-------|\n";
-    file << "| GPU Clock Rate | " << info.gpuClockRate / 1000 << " MHz |\n";
+    fprintf(file, "\n## Performance Metrics\n\n");
+    fprintf(file, "| Property | Value |\n");
+    fprintf(file, "|----------|-------|\n");
+    fprintf(file, "| GPU Clock Rate | %d MHz |\n", info.gpuClockRate / 1000);
     int coresPerSM = getFP32CoresPerSM(info.major, info.minor);
     double peakFlops = calcPeakFlops(info.multiProcessorCount, coresPerSM, info.gpuClockRate);
-    file << "| FP32 Cores/SM | " << coresPerSM << " |\n";
-    file << "| Peak FP32 FLOPS | " << peakFlops / 1e12 << " TFLOPS |\n";
-    double dpRatio = info.singleToDoublePrecisionPerfRatio > 0 ?
-                     1.0 / info.singleToDoublePrecisionPerfRatio : 1.0 / 32.0;
-    file << "| Peak FP64 FLOPS | " << peakFlops * dpRatio / 1e12 << " TFLOPS |\n";
-    file << "| SP/DP Performance Ratio | " << info.singleToDoublePrecisionPerfRatio << ":1 |\n";
-    file << "| Tensor Core Support | " << (hasTensorCore(info.major, info.minor) ? "Yes" : "No") << " |\n";
+    fprintf(file, "| FP32 Cores/SM | %d |\n", coresPerSM);
+    fprintf(file, "| Peak FP32 FLOPS | %.2f TFLOPS |\n", peakFlops / 1e12);
+    fprintf(file, "| Tensor Core Support | %s |\n", hasTensorCore(info.major, info.minor) ? "Yes" : "No");
 
-    file << "\n## Cache & Execution Capabilities\n\n";
-    file << "| Property | Value |\n";
-    file << "|----------|-------|\n";
-    file << "| L2 Cache Size | " << (double)info.l2CacheSize / 1024 << " KB |\n";
-    file << "| Concurrent Kernels | " << info.concurrentKernels << " |\n";
-    file << "| Async Copy Engines | " << info.asyncEngineCount << " |\n";
-    file << "| Compute Preemption | " << (info.computePreemption ? "Yes" : "No") << " |\n";
-    file << "| Managed Memory | " << (info.managedMemory ? "Yes" : "No") << " |\n";
+    fprintf(file, "\n## Cache & Execution Capabilities\n\n");
+    fprintf(file, "| Property | Value |\n");
+    fprintf(file, "|----------|-------|\n");
+    fprintf(file, "| L2 Cache Size | %.2f KB |\n", (double)info.l2CacheSize / 1024);
+    fprintf(file, "| Concurrent Kernels | %d |\n", info.concurrentKernels);
+    fprintf(file, "| Async Copy Engines | %d |\n", info.asyncEngineCount);
+    fprintf(file, "| Managed Memory | %s |\n", info.managedMemory ? "Yes" : "No");
 
-    file << "\n## Grid & Dimension Limits\n\n";
-    file << "| Property | Value |\n";
-    file << "|----------|-------|\n";
-    file << "| Max Threads Dimensions | (" << info.maxThreadsDim[0] << ", "
-         << info.maxThreadsDim[1] << ", " << info.maxThreadsDim[2] << ") |\n";
-    file << "| Max Grid Size | (" << info.maxGridSize[0] << ", "
-         << info.maxGridSize[1] << ", " << info.maxGridSize[2] << ") |\n";
+    fprintf(file, "\n## Grid & Dimension Limits\n\n");
+    fprintf(file, "| Property | Value |\n");
+    fprintf(file, "|----------|-------|\n");
+    fprintf(file, "| Max Threads Dimensions | (%d, %d, %d) |\n",
+            info.maxThreadsDim[0], info.maxThreadsDim[1], info.maxThreadsDim[2]);
+    fprintf(file, "| Max Grid Size | (%d, %d, %d) |\n",
+            info.maxGridSize[0], info.maxGridSize[1], info.maxGridSize[2]);
 
-    file << "\n## SpMV Optimization Implications\n\n";
-    file << "### Warp Size Considerations\n";
+    fprintf(file, "\n## SpMV Optimization Implications\n\n");
+    fprintf(file, "### Warp Size Considerations\n");
     if (info.warpSize == 32) {
-        file << "- Standard NVIDIA warp size (32 threads)\n";
-        file << "- Use vector-based and merge-based SpMV kernels\n";
-        file << "- Each warp processes multiple rows or uses merge-based load balancing\n";
+        fprintf(file, "- Standard NVIDIA warp size (32 threads)\n");
+        fprintf(file, "- Use vector-based and merge-based SpMV kernels\n");
+        fprintf(file, "- Each warp processes multiple rows or uses merge-based load balancing\n");
     } else if (info.warpSize == 64) {
-        file << "- **Extended warp size (64 threads) - Domestic GPU**\n";
-        file << "- Critical: Kernel design must adapt to 64-thread warps\n";
-        file << "- Register pressure higher per warp\n";
-        file << "- Shared memory usage per warp doubled\n";
-        file << "- Recommended: Use larger block sizes to match warp size\n";
+        fprintf(file, "- **Extended warp size (64 threads) - Domestic GPU**\n");
+        fprintf(file, "- Critical: Kernel design must adapt to 64-thread warps\n");
+        fprintf(file, "- Register pressure higher per warp\n");
+        fprintf(file, "- Shared memory usage per warp doubled\n");
+        fprintf(file, "- Recommended: Use larger block sizes to match warp size\n");
     }
 
-    file << "\n### Shared Memory Strategy\n";
-    file << "- Available shared memory per SM: " << (double)info.sharedMemPerSM / 1024 << " KB\n";
-    file << "- Max shared memory per block: " << (double)info.maxSharedMemPerBlockOptin / 1024 << " KB\n";
-    file << "- For CSR SpMV: Consider using shared memory for row pointer caching\n";
+    fprintf(file, "\n### Shared Memory Strategy\n");
+    fprintf(file, "- Available shared memory per SM: %.2f KB\n", (double)info.sharedMemPerSM / 1024);
+    fprintf(file, "- Max shared memory per block: %.2f KB\n", (double)info.sharedMemPerBlockOptin / 1024);
+    fprintf(file, "- For CSR SpMV: Consider using shared memory for row pointer caching\n");
 
-    file << "\n### Register Usage\n";
-    file << "- Registers per SM: " << info.regsPerSM << "\n";
-    file << "- Registers per block: " << info.regsPerBlock << "\n";
-    file << "- Max threads per SM: " << info.maxThreadsPerSM << "\n";
-    file << "- Recommended register usage per thread: < " << info.regsPerSM / info.maxThreadsPerSM << "\n";
+    fprintf(file, "\n### Register Usage\n");
+    fprintf(file, "- Registers per SM: %d\n", info.regsPerSM);
+    fprintf(file, "- Registers per block: %d\n", info.regsPerBlock);
+    fprintf(file, "- Max threads per SM: %d\n", info.maxThreadsPerSM);
+    fprintf(file, "- Recommended register usage per thread: < %d\n", info.regsPerSM / info.maxThreadsPerSM);
 
-    file << "\n### Bandwidth Optimization\n";
-    file << "- Peak bandwidth: " << bandwidth << " GB/s\n";
-    file << "- SpMV is memory-bound; optimize for bandwidth utilization\n";
-    file << "- Target: >80% bandwidth utilization for large matrices\n";
+    fprintf(file, "\n### Bandwidth Optimization\n");
+    fprintf(file, "- Peak bandwidth: %.2f GB/s\n", bandwidth);
+    fprintf(file, "- SpMV is memory-bound; optimize for bandwidth utilization\n");
+    fprintf(file, "- Target: >80%% bandwidth utilization for large matrices\n");
 
-    file << "\n### SM Occupancy\n";
-    file << "- Target occupancy: 50-100% for SpMV kernels\n";
-    file << "- Block size recommendation: " << info.warpSize * 2 << " - " << info.warpSize * 4 << "\n";
+    fprintf(file, "\n### SM Occupancy\n");
+    fprintf(file, "- Target occupancy: 50-100%% for SpMV kernels\n");
+    fprintf(file, "- Block size recommendation: %d - %d\n", info.warpSize * 2, info.warpSize * 4);
 
-    file.close();
+    fclose(file);
     printf("Markdown file written to: %s\n", filename);
 }
 
@@ -305,10 +295,14 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    printf("\nFound %d CUDA device(s)\n", deviceCount);
+    printf("\n============================================\n");
+    printf("  SpMV GPU Device Information Query Tool\n");
+    printf("============================================\n\n");
+
+    printf("Found %d CUDA device(s)\n\n", deviceCount);
 
     // Parse command line arguments
-    int targetDevice = -1;  // -1 means all devices
+    int targetDevice = -1;
     bool writeFiles = false;
     char outputFile[512] = "gpu_info.md";
 
@@ -331,24 +325,22 @@ int main(int argc, char** argv) {
     }
 
     if (targetDevice >= 0 && targetDevice < deviceCount) {
-        // Query single device
-        DeviceInfoExtended info = getDeviceInfo(targetDevice);
+        DeviceInfo info = getDeviceInfo(targetDevice);
         if (info.deviceId >= 0) {
             printConsole(info);
             if (writeFiles) {
-                writeMarkdownFile(info, outputFile);
+                writeMarkdown(info, outputFile);
             }
         }
     } else {
-        // Query all devices
         for (int dev = 0; dev < deviceCount; dev++) {
-            DeviceInfoExtended info = getDeviceInfo(dev);
+            DeviceInfo info = getDeviceInfo(dev);
             if (info.deviceId >= 0) {
                 printConsole(info);
                 if (writeFiles) {
                     char filename[520];
                     sprintf(filename, "gpu_%d_info.md", dev);
-                    writeMarkdownFile(info, filename);
+                    writeMarkdown(info, filename);
                 }
             }
         }
@@ -362,7 +354,7 @@ int main(int argc, char** argv) {
         if (targetDevice >= 0 && dev != targetDevice) continue;
 
         cudaSetDevice(dev);
-        DeviceInfoExtended info = getDeviceInfo(dev);
+        DeviceInfo info = getDeviceInfo(dev);
 
         size_t size = 256 * 1024 * 1024;  // 256 MB
         float* d_data;
@@ -375,7 +367,7 @@ int main(int argc, char** argv) {
         // Warmup
         cudaMemset(d_data, 0, size);
 
-        // Measure read bandwidth (copy to dummy)
+        // Measure memset bandwidth
         cudaEventRecord(start);
         cudaMemset(d_data, 1, size);
         cudaEventRecord(stop);
@@ -383,7 +375,7 @@ int main(int argc, char** argv) {
 
         float memsetTime = 0;
         cudaEventElapsedTime(&memsetTime, start, stop);
-        double memsetBW = (double)size / memsetTime / 1e6;  // GB/s
+        double memsetBW = (double)size / memsetTime / 1e6;
 
         // Measure copy bandwidth
         float* h_data = (float*)malloc(size);
@@ -405,14 +397,14 @@ int main(int argc, char** argv) {
         cudaEventElapsedTime(&h2dTime, start, stop);
         double h2dBW = (double)size / h2dTime / 1e6;
 
+        double peakBW = calcPeakBandwidth(info.memoryBusWidth, info.memoryClockRate);
+
         printf("Device %d (%s) Bandwidth Test:\n", dev, info.name);
         printf("  Memset Bandwidth:     %.2f GB/s\n", memsetBW);
         printf("  Device->Host BW:      %.2f GB/s\n", d2hBW);
         printf("  Host->Device BW:      %.2f GB/s\n", h2dBW);
-        printf("  Peak (Theoretical):   %.2f GB/s\n",
-               calcPeakBandwidth(info.memoryBusWidth, info.memoryClockRate));
-        printf("  Efficiency:           %.1f%%\n",
-               memsetBW / calcPeakBandwidth(info.memoryBusWidth, info.memoryClockRate) * 100);
+        printf("  Peak (Theoretical):   %.2f GB/s\n", peakBW);
+        printf("  Efficiency:           %.1f%%\n", memsetBW / peakBW * 100);
 
         cudaEventDestroy(start);
         cudaEventDestroy(stop);
