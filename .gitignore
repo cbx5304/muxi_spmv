@@ -1,0 +1,44 @@
+# Claude Code settings (do not include in git)
+.claude/
+
+# Build artifacts
+build/
+out/
+*.o
+*.obj
+*.exe
+*.dll
+*.so
+*.dylib
+
+# CUDA specific
+*.cubin
+*.fatbin
+*.ptx
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# CMake generated
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.cmake
+!cmake/*.cmake
+
+# Test outputs
+tests/output/
+*.log
+
+# Documentation generated files
+doc/generated/
+
+# Temporary files
+*.tmp
+*.temp
