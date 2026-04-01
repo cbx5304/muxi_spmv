@@ -1,6 +1,9 @@
 # Claude Code settings (do not include in git)
 .claude/
 
+# Project code directory (managed separately)
+project_code_main/
+
 # Build artifacts
 build/
 out/
