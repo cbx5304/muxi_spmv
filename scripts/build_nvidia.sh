@@ -1,16 +1,15 @@
 #!/bin/bash
-# 编译脚本 - 国产GPU (Mars X201)
-# 使用cu-bridge的nvcc包装器直接编译
+# 编译脚本 - NVIDIA RTX 4090
+# 使用标准CUDA nvcc编译
 
-# 设置环境变量
-export PATH=$HOME/cu-bridge/CUDA_DIR/bin:$PATH
-export LIBRARY_PATH=$HOME/cu-bridge/CUDA_DIR/lib64:/opt/hpcc/lib:$LIBRARY_PATH
-export LD_LIBRARY_PATH=$HOME/cu-bridge/CUDA_DIR/lib64:/opt/hpcc/lib:$LD_LIBRARY_PATH
+# 设置环境变量 (根据服务器配置调整)
+export PATH=/usr/local/cuda/bin:$PATH
+export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 
 # 编译参数
-NVCC=$HOME/cu-bridge/CUDA_DIR/bin/nvcc
+NVCC=nvcc
 OPT_FLAGS="-O3"
-WARP_SIZE_FLAG="-DWARP_SIZE=64"
+WARP_SIZE_FLAG="-DWARP_SIZE=32"
 INCLUDE_FLAG="-Isrc"
 SRC_DIR="src"
 
@@ -70,7 +69,6 @@ case "$1" in
         ;;
     *)
         echo "Usage: $0 {device_info|test_spmv|test_runner|all}"
-        echo "Note: Run with CUDA_VISIBLE_DEVICES=7 for GPU execution"
         exit 1
         ;;
 esac

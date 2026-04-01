@@ -145,6 +145,28 @@ struct COOMatrix {
             CUDA_CHECK_NO_RETURN(cudaFree(d_values));
         }
     }
+
+    // Allocate host memory
+    void allocateHost(int rows, int cols, int nonzeros) {
+        numRows = rows;
+        numCols = cols;
+        nnz = nonzeros;
+
+        rowIdx = (int*)malloc(nnz * sizeof(int));
+        colIdx = (int*)malloc(nnz * sizeof(int));
+        values = (FloatType*)malloc(nnz * sizeof(FloatType));
+
+        ownsHostMemory = true;
+    }
+
+    // Allocate device memory
+    void allocateDevice() {
+        CUDA_CHECK_NO_RETURN(cudaMalloc(&d_rowIdx, nnz * sizeof(int)));
+        CUDA_CHECK_NO_RETURN(cudaMalloc(&d_colIdx, nnz * sizeof(int)));
+        CUDA_CHECK_NO_RETURN(cudaMalloc(&d_values, nnz * sizeof(FloatType)));
+
+        ownsDeviceMemory = true;
+    }
 };
 
 /**
