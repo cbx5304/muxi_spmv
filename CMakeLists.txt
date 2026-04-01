@@ -9,8 +9,17 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_STANDARD 14)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
-# CUDA architecture settings
-set(CUDA_ARCH "89" CACHE STRING "CUDA architecture (e.g., 89 for RTX 4090, 80 for A100)")
+# CUDA architecture settings (optional, not supported on domestic GPU)
+# Set to empty string for domestic GPU (Mars X201)
+set(CUDA_ARCH "" CACHE STRING "CUDA architecture (e.g., 89 for RTX 4090, empty for domestic GPU)")
+
+# Only set CUDA architectures if specified (domestic GPU doesn't support sm_xx)
+if(NOT CUDA_ARCH STREQUAL "")
+    set(CMAKE_CUDA_ARCHITECTURES "${CUDA_ARCH}")
+    message(STATUS "CUDA architecture: ${CUDA_ARCH}")
+else()
+    message(STATUS "CUDA architecture not specified (for domestic GPU compatibility)")
+endif()
 
 # Enable position independent code for shared library
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -18,9 +27,6 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 # Compiler options
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra")
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3")
-
-# Set CUDA architecture
-set(CMAKE_CUDA_ARCHITECTURES "${CUDA_ARCH}")
 
 # Warp size detection - default to 32 (NVIDIA)
 # Will be overridden based on GPU detection
