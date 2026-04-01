@@ -89,8 +89,9 @@ spmv_status_t spmv_csr<float>(
         // Scalar kernel is extremely inefficient on warp=64 architecture
         int blockSize = config.blockSize;
         // For vector kernel: each warp processes one row
-        // Total threads needed = numRows * warpSize
-        int gridSize = getGridSize(matrix.numRows * WARP_SIZE, blockSize);
+        // Each block has (blockSize / warpSize) warps
+        int warpsPerBlock = blockSize / WARP_SIZE;
+        int gridSize = getGridSize(numRows, warpsPerBlock);
 
         if (opts.operation == SPMV_OP_TRANSPOSE) {
             spmv_csr_scalar_kernel<float, true><<<gridSize, blockSize, 0, stream>>>(
@@ -171,7 +172,8 @@ spmv_status_t spmv_csr<double>(
     if (WARP_SIZE == 64) {
         int blockSize = config.blockSize;
         // For vector kernel: each warp processes one row
-        int gridSize = getGridSize(matrix.numRows * WARP_SIZE, blockSize);
+        int warpsPerBlock = blockSize / WARP_SIZE;
+        int gridSize = getGridSize(matrix.numRows, warpsPerBlock);
 
         if (opts.operation == SPMV_OP_TRANSPOSE) {
             spmv_csr_scalar_kernel<double, true><<<gridSize, blockSize, 0, stream>>>(
