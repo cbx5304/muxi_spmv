@@ -356,5 +356,9 @@ template spmv_status_t generateConcentratedMatrix<double>(int rows, int cols, in
 template spmv_status_t generatePowerLawMatrix<float>(int rows, int cols, int nnz, double alpha, CSRMatrix<float>& matrix);
 template spmv_status_t generatePowerLawMatrix<double>(int rows, int cols, int nnz, double alpha, CSRMatrix<double>& matrix);
 
+// Factory function explicit instantiation
+template MatrixGenerator<float>* createGenerator<float>(MatrixType type);
+template MatrixGenerator<double>* createGenerator<double>(MatrixType type);
+
 } // namespace generators
 } // namespace muxi_spmv
