@@ -162,6 +162,9 @@ spmv_status_t measureCSRPerformance(
     return SPMV_SUCCESS;
 }
 
+// cuSPARSE comparison is disabled for domestic GPU
+// The domestic GPU uses hcsparse which has different API
+#ifdef ENABLE_CUSPARSE
 template<typename FloatType>
 spmv_status_t compareWithCusparse(
     const CSRMatrix<FloatType>& matrix,
@@ -253,11 +256,12 @@ spmv_status_t compareWithCusparse(
     cudaEventDestroy(stop);
     cusparseDestroyDnVec(vecX);
     cusparseDestroyDnVec(vecY);
-    cusparseDestroyCsr(matDescr);
+    cusparseDestroySpMat(matDescr);
     cusparseDestroy(cusparseHandle);
 
     return SPMV_SUCCESS;
 }
+#endif // ENABLE_CUSPARSE
 
 void printPerformanceResult(const PerformanceResult& result) {
     printf("\n=== Performance Results ===\n");

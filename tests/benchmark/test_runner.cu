@@ -264,7 +264,7 @@ int runTest(const TestOptions& opts) {
             printf("cuSPARSE GFLOPS: %.2f\n", cusparseGflops);
             printf("Speedup: %.2fx\n", cusparseTime / result.timeMs);
         } else {
-            printf("cuSPARSE comparison failed (not available on this GPU)\n");
+            printf("cuSPARSE comparison not available on this GPU\n");
         }
     }
 

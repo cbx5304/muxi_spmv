@@ -44,8 +44,7 @@ build_test_runner() {
         $GEN_SRCS \
         $BENCH_SRCS \
         tests/benchmark/test_runner.cu \
-        -o test_runner \
-        -lcusparse
+        -o test_runner
 }
 
 build_all() {

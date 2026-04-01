@@ -119,7 +119,7 @@ spmv_status_t measureCSRPerformance(
     PerformanceResult& result);
 
 /**
- * @brief Compare with cuSPARSE performance
+ * @brief Compare with cuSPARSE performance (NVIDIA only)
  * @tparam FloatType Floating point type
  * @param matrix CSR matrix (must be on device)
  * @param d_x Input vector on device
@@ -128,7 +128,9 @@ spmv_status_t measureCSRPerformance(
  * @param cusparseTime Output cuSPARSE time
  * @param cusparseGflops Output cuSPARSE GFLOPS
  * @return Status code
+ * @note This function is only available on NVIDIA GPUs
  */
+#ifdef ENABLE_CUSPARSE
 template<typename FloatType>
 spmv_status_t compareWithCusparse(
     const CSRMatrix<FloatType>& matrix,
@@ -137,6 +139,19 @@ spmv_status_t compareWithCusparse(
     const BenchmarkConfig& config,
     double& cusparseTime,
     double& cusparseGflops);
+#else
+template<typename FloatType>
+inline spmv_status_t compareWithCusparse(
+    const CSRMatrix<FloatType>&,
+    const FloatType*,
+    FloatType*,
+    const BenchmarkConfig&,
+    double&,
+    double&) {
+    // cuSPARSE not available on this platform
+    return SPMV_ERROR_UNSUPPORTED_FORMAT;
+}
+#endif
 
 /**
  * @brief Run comprehensive benchmark suite
