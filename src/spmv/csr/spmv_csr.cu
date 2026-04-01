@@ -91,7 +91,7 @@ spmv_status_t spmv_csr<float>(
         // For vector kernel: each warp processes one row
         // Each block has (blockSize / warpSize) warps
         int warpsPerBlock = blockSize / WARP_SIZE;
-        int gridSize = getGridSize(numRows, warpsPerBlock);
+        int gridSize = getGridSize(matrix.numRows, warpsPerBlock);
 
         if (opts.operation == SPMV_OP_TRANSPOSE) {
             spmv_csr_scalar_kernel<float, true><<<gridSize, blockSize, 0, stream>>>(
