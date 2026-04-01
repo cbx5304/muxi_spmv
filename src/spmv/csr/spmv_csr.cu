@@ -15,7 +15,7 @@ CSRKernelConfig getOptimalConfig(int numRows, int nnz, int avgNnzPerRow, int war
     // Determine block size based on warp size
     if (warpSize == 64) {
         // Domestic GPU with 64-thread warp
-        config.blockSize = 128;  // 2 warps per block
+        config.blockSize = 256;  // 4 warps per block (increased for better occupancy)
         config.itemsPerThread = 4;
     } else {
         // NVIDIA GPU with 32-thread warp
@@ -85,7 +85,8 @@ spmv_status_t spmv_csr<float>(
         matrix.numRows, matrix.nnz, avgNnzPerRow, WARP_SIZE);
 
     if (WARP_SIZE == 64) {
-        // Domestic GPU kernel
+        // Domestic GPU kernel - ALWAYS use vector kernel for warp=64
+        // Scalar kernel is extremely inefficient on warp=64 architecture
         int blockSize = config.blockSize;
         int gridSize = getGridSize(
             (matrix.numRows * 64 + blockSize - 1) / 64, blockSize);
@@ -96,19 +97,13 @@ spmv_status_t spmv_csr<float>(
                 matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
                 x, y);
         } else {
-            if (avgNnzPerRow < 32) {
-                // Use scalar kernel for very sparse rows
-                spmv_csr_scalar_kernel<float, false><<<gridSize, blockSize, 0, stream>>>(
-                    matrix.numRows, matrix.numCols, matrix.nnz,
-                    matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
-                    x, y);
-            } else {
-                // Use vector kernel
-                spmv_csr_vector_kernel<float, 64, false><<<gridSize, blockSize, 0, stream>>>(
-                    matrix.numRows, matrix.numCols, matrix.nnz,
-                    matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
-                    x, y);
-            }
+            // Always use vector kernel for warp=64
+            // Even for very sparse rows, vector kernel outperforms scalar
+            // because it utilizes all 64 threads in a warp
+            spmv_csr_vector_kernel<float, 64, false><<<gridSize, blockSize, 0, stream>>>(
+                matrix.numRows, matrix.numCols, matrix.nnz,
+                matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
+                x, y);
         }
     } else {
         // NVIDIA GPU kernel
@@ -183,17 +178,11 @@ spmv_status_t spmv_csr<double>(
                 matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
                 x, y);
         } else {
-            if (avgNnzPerRow < 32) {
-                spmv_csr_scalar_kernel<double, false><<<gridSize, blockSize, 0, stream>>>(
-                    matrix.numRows, matrix.numCols, matrix.nnz,
-                    matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
-                    x, y);
-            } else {
-                spmv_csr_vector_kernel<double, 64, false><<<gridSize, blockSize, 0, stream>>>(
-                    matrix.numRows, matrix.numCols, matrix.nnz,
-                    matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
-                    x, y);
-            }
+            // Always use vector kernel for warp=64
+            spmv_csr_vector_kernel<double, 64, false><<<gridSize, blockSize, 0, stream>>>(
+                matrix.numRows, matrix.numCols, matrix.nnz,
+                matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
+                x, y);
         }
     } else {
         int blockSize = config.blockSize;
