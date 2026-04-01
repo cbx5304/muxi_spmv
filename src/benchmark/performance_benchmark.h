@@ -10,6 +10,7 @@
 #include "formats/sparse_formats.h"
 #include "api/spmv_api.h"
 #include <cuda_runtime.h>
+#include <vector>
 
 namespace muxi_spmv {
 namespace benchmark {
@@ -52,7 +53,7 @@ struct BenchmarkConfig {
     bool checkCorrectness;      ///< Verify results after execution
     bool syncAfterEach;         ///< Synchronize after each iteration
     cudaStream_t stream;        ///< CUDA stream to use
-    FloatType floatType;        ///< Data type (float/double)
+    spmv_type_t floatType;      ///< Data type (SPMV_TYPE_FLOAT/DOUBLE)
     bool compareCusparse;       ///< Compare with cuSPARSE
 
     BenchmarkConfig() : warmupIterations(3), measureIterations(10),

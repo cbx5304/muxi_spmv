@@ -16,6 +16,19 @@
 namespace muxi_spmv {
 namespace benchmark {
 
+// Type helpers for cuSPARSE (must be defined before use)
+template<typename FloatType>
+struct CuSparseType {
+    static cudaDataType_t value;
+};
+template<> cudaDataType_t CuSparseType<float>::value = CUDA_R_32F;
+template<> cudaDataType_t CuSparseType<double>::value = CUDA_R_64F;
+
+template<typename FloatType>
+inline FloatType alphaValue() { return static_cast<FloatType>(1.0); }
+template<typename FloatType>
+inline FloatType betaValue() { return static_cast<FloatType>(0.0); }
+
 // Helper to calculate statistics
 static void calculateStats(const std::vector<double>& times,
                            double& min, double& max, double& avg, double& stdDev) {
@@ -185,10 +198,13 @@ spmv_status_t compareWithCusparse(
                         CuSparseType<FloatType>::value);
     cusparseCreateDnVec(&vecY, matrix.numRows, d_y, CuSparseType<FloatType>::value);
 
+    FloatType alphaVal = alphaValue<FloatType>();
+    FloatType betaVal = betaValue<FloatType>();
+
     // Allocate buffer
     size_t bufferSize;
     cusparseSpMV_bufferSize(cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE,
-                            &alpha<FloatType>(), matDescr, vecX, &beta<FloatType>(),
+                            &alphaVal, matDescr, vecX, &betaVal,
                             vecY, CuSparseType<FloatType>::value,
                             CUSPARSE_SPMV_ALG_DEFAULT, &bufferSize);
 
@@ -205,7 +221,7 @@ spmv_status_t compareWithCusparse(
     // Warmup
     for (int i = 0; i < config.warmupIterations; i++) {
         cusparseSpMV(cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE,
-                     &alpha<FloatType>(), matDescr, vecX, &beta<FloatType>(),
+                     &alphaVal, matDescr, vecX, &betaVal,
                      vecY, CuSparseType<FloatType>::value,
                      CUSPARSE_SPMV_ALG_DEFAULT, buffer);
     }
@@ -215,7 +231,7 @@ spmv_status_t compareWithCusparse(
     for (int i = 0; i < config.measureIterations; i++) {
         cudaEventRecord(start);
         cusparseSpMV(cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE,
-                     &alpha<FloatType>(), matDescr, vecX, &beta<FloatType>(),
+                     &alphaVal, matDescr, vecX, &betaVal,
                      vecY, CuSparseType<FloatType>::value,
                      CUSPARSE_SPMV_ALG_DEFAULT, buffer);
         cudaEventRecord(stop);
@@ -242,23 +258,6 @@ spmv_status_t compareWithCusparse(
 
     return SPMV_SUCCESS;
 }
-
-// Type helpers for cuSPARSE
-template<typename FloatType>
-struct CuSparseType {
-    static cudaDataType_t value;
-};
-template<> cudaDataType_t CuSparseType<float>::value = CUDA_R_32F;
-template<> cudaDataType_t CuSparseType<double>::value = CUDA_R_64F;
-
-template<typename FloatType>
-struct alpha {
-    static FloatType value() { return static_cast<FloatType>(1.0); }
-};
-template<typename FloatType>
-struct beta {
-    static FloatType value() { return static_cast<FloatType>(0.0); }
-};
 
 void printPerformanceResult(const PerformanceResult& result) {
     printf("\n=== Performance Results ===\n");
