@@ -16,6 +16,7 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include <algorithm>
 
 using namespace muxi_spmv;
 using namespace muxi_spmv::generators;
