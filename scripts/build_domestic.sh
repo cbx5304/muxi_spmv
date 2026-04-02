@@ -15,7 +15,7 @@ INCLUDE_FLAG="-Isrc"
 SRC_DIR="src"
 
 # 核心源文件
-CORE_SRCS="$SRC_DIR/spmv/csr/spmv_csr.cu $SRC_DIR/utils/device_info.cu $SRC_DIR/api/spmv_api.cu"
+CORE_SRCS="$SRC_DIR/spmv/csr/spmv_csr.cu $SRC_DIR/spmv/csr5/spmv_csr5.cu $SRC_DIR/utils/device_info.cu $SRC_DIR/api/spmv_api.cu"
 
 # 生成器源文件
 GEN_SRCS="$SRC_DIR/generators/matrix_generator.cu $SRC_DIR/generators/mtx_io.cu"
@@ -39,12 +39,14 @@ build_test_spmv() {
 
 build_test_runner() {
     echo "Building test_runner..."
+    # Compile all sources together to ensure template instantiation works
     $NVCC $OPT_FLAGS $WARP_SIZE_FLAG $INCLUDE_FLAG \
         $CORE_SRCS \
         $GEN_SRCS \
         $BENCH_SRCS \
         tests/benchmark/test_runner.cu \
-        -o test_runner
+        -o test_runner \
+        -lcudart
 }
 
 build_all() {

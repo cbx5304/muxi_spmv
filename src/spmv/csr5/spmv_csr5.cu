@@ -361,11 +361,10 @@ spmv_status_t spmv_csr5(
     return SPMV_SUCCESS;
 }
 
-// Template instantiations
-template spmv_status_t csr5_preprocess<float>(const CSRMatrix<float>&, CSR5Matrix<float>&, int, cudaStream_t);
-template spmv_status_t csr5_preprocess<double>(const CSRMatrix<double>&, CSR5Matrix<double>&, int, cudaStream_t);
-template spmv_status_t spmv_csr5<float>(const CSR5Matrix<float>&, const float*, float*, float, float, const spmv_opts_t&);
-template spmv_status_t spmv_csr5<double>(const CSR5Matrix<double>&, const double*, double*, double, double, const spmv_opts_t&);
+// Note: Template instantiation happens implicitly when compiling with test_runner
+// Explicit instantiation removed for domestic GPU cu-bridge compatibility
+
+} // namespace muxi_spmv
 
 // ==================== Optimized CSR5 Kernel with Warp Aggregation ====================
 
@@ -763,8 +762,6 @@ spmv_status_t spmv_merge_based(
     return SPMV_SUCCESS;
 }
 
-// Template instantiations for merge-based
-template spmv_status_t spmv_merge_based<float>(const CSRMatrix<float>&, const float*, float*, cudaStream_t);
-template spmv_status_t spmv_merge_based<double>(const CSRMatrix<double>&, const double*, double*, cudaStream_t);
+// Note: Template instantiation happens implicitly when compiling with test_runner
 
 } // namespace muxi_spmv
