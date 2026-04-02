@@ -757,6 +757,15 @@ spmv_status_t spmv_merge_based(
     return SPMV_SUCCESS;
 }
 
-// Note: Template instantiation happens implicitly when compiling with test_runner
+// ==================== Explicit Template Instantiation ====================
+// These instantiations ensure the template code is generated for the linker.
+// cu-bridge will replace cudaStream_t with the appropriate type.
+
+template spmv_status_t csr5_preprocess<float>(const CSRMatrix<float>&, CSR5Matrix<float>&, int, cudaStream_t);
+template spmv_status_t csr5_preprocess<double>(const CSRMatrix<double>&, CSR5Matrix<double>&, int, cudaStream_t);
+template spmv_status_t spmv_csr5<float>(const CSR5Matrix<float>&, const float*, float*, float, float, const spmv_opts_t&);
+template spmv_status_t spmv_csr5<double>(const CSR5Matrix<double>&, const double*, double*, double, double, const spmv_opts_t&);
+template spmv_status_t spmv_merge_based<float>(const CSRMatrix<float>&, const float*, float*, cudaStream_t);
+template spmv_status_t spmv_merge_based<double>(const CSRMatrix<double>&, const double*, double*, cudaStream_t);
 
 } // namespace muxi_spmv
