@@ -42,6 +42,14 @@ struct PerformanceResult {
     int deviceId;
     int warpSize;
     double peakBandwidthGBs;    ///< Device peak bandwidth
+
+    // === CSR5 specific fields ===
+    bool useCSR5;               ///< Whether CSR5 format was used
+    double conversionTimeMs;    ///< CSR->CSR5 conversion time (ms)
+    double totalTimeMs;         ///< Total time including conversion
+    int numTiles;               ///< Number of tiles (CSR5)
+    int tileSize;               ///< Tile size sigma (CSR5)
+    double conversionOverheadPercent; ///< Conversion overhead as % of execution time
 };
 
 /**
@@ -70,8 +78,10 @@ struct BenchmarkConfig {
  */
 inline double calculateGFlops(int nnz, double timeMs) {
     // SpMV: 2 FLOPs per non-zero (multiply + add)
-    // GFLOPS = (2 * nnz) / (timeMs * 1e-6) / 1e9
-    return (2.0 * nnz) / (timeMs * 1e6) / 1e9;
+    // GFLOPS = (2 * nnz) / timeSeconds / 1e9
+    // timeSeconds = timeMs / 1000 = timeMs * 1e-3
+    // So: GFLOPS = (2 * nnz) / (timeMs * 1e-3) / 1e9 = (2 * nnz) / timeMs / 1e6
+    return (2.0 * nnz) / timeMs / 1e6;
 }
 
 /**
@@ -94,8 +104,10 @@ inline double calculateBandwidth(int nnz, int numRows, int numCols,
     size_t dataBytes = nnz * floatBytes + nnz * 4 + (numRows + 1) * 4 +
                        numCols * floatBytes + numRows * floatBytes;
 
-    // GB/s = dataBytes / (timeMs * 1e-6) / 1e9
-    return static_cast<double>(dataBytes) / (timeMs * 1e6);
+    // Bandwidth (GB/s) = dataBytes / timeSeconds / 1e9
+    // timeSeconds = timeMs / 1000 = timeMs * 1e-3
+    // So: GB/s = dataBytes / (timeMs * 1e-3) / 1e9 = dataBytes / timeMs / 1e6
+    return static_cast<double>(dataBytes) / timeMs / 1e6;
 }
 
 /**
@@ -181,6 +193,31 @@ void printPerformanceResult(const PerformanceResult& result);
  */
 spmv_status_t writeResultsJSON(const std::vector<PerformanceResult>& results,
                                 const char* filename);
+
+/**
+ * @brief Measure CSR5 SpMV performance including conversion
+ *
+ * @tparam FloatType Floating point type
+ * @param csr Input CSR matrix (must be on device)
+ * @param csr5 CSR5 matrix (will be converted from CSR)
+ * @param d_x Input vector on device
+ * @param d_y Output vector on device (will be overwritten)
+ * @param config Benchmark configuration
+ * @param handle SpMV handle
+ * @param result Output performance result (includes conversion time)
+ * @param sigma Tile size for CSR5 (0 = auto)
+ * @return Status code
+ */
+template<typename FloatType>
+spmv_status_t measureCSR5Performance(
+    CSRMatrix<FloatType>& csr,
+    CSR5Matrix<FloatType>& csr5,
+    const FloatType* d_x,
+    FloatType* d_y,
+    const BenchmarkConfig& config,
+    spmv_handle_t* handle,
+    PerformanceResult& result,
+    int sigma = 0);
 
 } // namespace benchmark
 } // namespace muxi_spmv

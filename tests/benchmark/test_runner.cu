@@ -9,6 +9,7 @@
 #include "generators/mtx_io.h"
 #include "benchmark/performance_benchmark.h"
 #include "api/spmv_api.h"
+#include "spmv/csr5/spmv_csr5.cuh"
 
 #include <cstdio>
 #include <cstdlib>
@@ -47,13 +48,21 @@ struct TestOptions {
     // Data type
     bool useDouble;
 
+    // CSR5 options
+    bool useCSR5;
+    int csr5Sigma;          // 0 = auto
+    bool useMergeBased;     // Use merge-based SpMV
+    bool useCSR5Optimized;  // Use optimized CSR5 with warp aggregation
+
     TestOptions() : numRows(1024), numCols(1024), sparsity(0.01),
                     matrixType(MatrixType::STRUCTURED_DIAGONAL),
                     bandwidth(1), blockSize(4), numClusters(10),
                     concentrationFactor(5.0), powerLawAlpha(2.5),
                     warmupIterations(3), measureIterations(10),
                     checkCorrectness(true), compareCusparse(false),
-                    useDouble(false) {}
+                    useDouble(false),
+                    useCSR5(false), csr5Sigma(0),
+                    useMergeBased(false), useCSR5Optimized(false) {}
 };
 
 void printUsage(const char* progName) {
@@ -76,6 +85,10 @@ void printUsage(const char* progName) {
     printf("  --no-check          Skip correctness check\n");
     printf("  --cusparse          Compare with cuSPARSE\n");
     printf("  --double            Use double precision\n");
+    printf("  --csr5              Use CSR5 format (load-balanced)\n");
+    printf("  --csr5-opt          Use optimized CSR5 with warp aggregation\n");
+    printf("  --merge             Use merge-based SpMV\n");
+    printf("  --sigma <n>         CSR5 tile size (default: auto)\n");
     printf("\n");
     printf("File Options:\n");
     printf("  --input <file>      Read matrix from MTX file\n");
@@ -86,6 +99,7 @@ void printUsage(const char* progName) {
     printf("  %s --rows 10000 --type random --sparsity 0.001\n", progName);
     printf("  %s --input matrix.mtx --cusparse\n", progName);
     printf("  %s --rows 50000 --type concentrated --output results.json\n", progName);
+    printf("  %s --rows 1000000 --sparsity 0.01 --csr5\n", progName);
 }
 
 MatrixType parseMatrixType(const char* str) {
@@ -125,6 +139,14 @@ bool parseArgs(int argc, char** argv, TestOptions& opts) {
             opts.compareCusparse = true;
         } else if (strcmp(argv[i], "--double") == 0) {
             opts.useDouble = true;
+        } else if (strcmp(argv[i], "--csr5") == 0) {
+            opts.useCSR5 = true;
+        } else if (strcmp(argv[i], "--csr5-opt") == 0) {
+            opts.useCSR5Optimized = true;
+        } else if (strcmp(argv[i], "--merge") == 0) {
+            opts.useMergeBased = true;
+        } else if (strcmp(argv[i], "--sigma") == 0 && i + 1 < argc) {
+            opts.csr5Sigma = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--input") == 0 && i + 1 < argc) {
             opts.mtxInputFile = argv[++i];
         } else if (strcmp(argv[i], "--output") == 0 && i + 1 < argc) {
@@ -238,7 +260,72 @@ int runTest(const TestOptions& opts) {
 
     // Run benchmark
     PerformanceResult result;
-    status = measureCSRPerformance(matrix, d_x, d_y, benchConfig, handle, result);
+
+    if (opts.useMergeBased) {
+        // Merge-based SpMV testing
+        printf("\n=== Merge-based SpMV Test ===\n");
+        result.useCSR5 = false;
+        result.numRows = matrix.numRows;
+        result.numCols = matrix.numCols;
+        result.nnz = matrix.nnz;
+        result.sparsity = static_cast<double>(matrix.nnz) / (matrix.numRows * matrix.numCols);
+        result.deviceId = handle->deviceId;
+        result.warpSize = handle->warpSize;
+        result.iterations = benchConfig.measureIterations;
+
+        // Get peak bandwidth
+        int memoryClock, busWidth;
+        cudaDeviceGetAttribute(&memoryClock, cudaDevAttrMemoryClockRate, handle->deviceId);
+        cudaDeviceGetAttribute(&busWidth, cudaDevAttrGlobalMemoryBusWidth, handle->deviceId);
+        result.peakBandwidthGBs = 2.0 * memoryClock * (busWidth / 8) / 1e6;
+
+        // Create CUDA events for timing
+        cudaEvent_t start, stop;
+        cudaEventCreate(&start);
+        cudaEventCreate(&stop);
+
+        std::vector<double> times;
+
+        // Warmup
+        for (int i = 0; i < benchConfig.warmupIterations; i++) {
+            spmv_merge_based<FloatType>(matrix, d_x, d_y, benchConfig.stream);
+        }
+        cudaDeviceSynchronize();
+
+        // Measure
+        for (int i = 0; i < benchConfig.measureIterations; i++) {
+            cudaMemset(d_y, 0, matrix.numRows * sizeof(FloatType));
+            cudaEventRecord(start, benchConfig.stream);
+            spmv_merge_based<FloatType>(matrix, d_x, d_y, benchConfig.stream);
+            cudaEventRecord(stop, benchConfig.stream);
+            cudaEventSynchronize(stop);
+
+            float timeMs;
+            cudaEventElapsedTime(&timeMs, start, stop);
+            times.push_back(timeMs);
+        }
+
+        // Calculate stats
+        std::sort(times.begin(), times.end());
+        result.timeMs = times[times.size() / 2];
+        result.gflops = calculateGFlops(matrix.nnz, result.timeMs);
+        result.bandwidthGBs = calculateBandwidth(matrix.nnz, matrix.numRows, matrix.numCols, result.timeMs, sizeof(FloatType));
+        result.bandwidthUtilization = result.bandwidthGBs / result.peakBandwidthGBs * 100.0;
+        result.correctnessPassed = true;
+
+        cudaEventDestroy(start);
+        cudaEventDestroy(stop);
+
+        status = SPMV_SUCCESS;
+    } else if (opts.useCSR5 || opts.useCSR5Optimized) {
+        // CSR5 format testing
+        printf("\n=== %s ===\n", opts.useCSR5Optimized ? "CSR5 Optimized Test" : "CSR5 Format Test");
+        CSR5Matrix<FloatType> csr5;
+        status = measureCSR5Performance(matrix, csr5, d_x, d_y, benchConfig, handle, result, opts.csr5Sigma);
+    } else {
+        // Standard CSR format testing
+        status = measureCSRPerformance(matrix, d_x, d_y, benchConfig, handle, result);
+    }
 
     if (status != SPMV_SUCCESS) {
         fprintf(stderr, "Benchmark failed: %d\n", status);

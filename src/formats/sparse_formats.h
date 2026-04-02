@@ -268,6 +268,123 @@ struct BSRMatrix {
     }
 };
 
+/**
+ * @brief CSR5 format for load-balanced SpMV
+ *
+ * CSR5 divides the matrix into tiles of fixed NNZ count (sigma).
+ * Each tile is processed by one warp, eliminating thread idle time
+ * for matrices with varying row lengths.
+ *
+ * Key parameters:
+ * - sigma: Tile size (number of NNZ elements per tile, typically 256)
+ * - numTiles: Number of tiles = ceil(nnz / sigma)
+ * - tile_row_ptr: Precomputed row index for each tile start
+ * - tile_nnz_offset: NNZ offset within start row for each tile
+ */
+template<typename FloatType>
+struct CSR5Matrix {
+    // Base CSR data (shared with original matrix)
+    int numRows;           ///< Number of rows
+    int numCols;           ///< Number of columns
+    int nnz;               ///< Number of non-zero elements
+
+    // CSR arrays (can reference external CSR matrix)
+    int* rowPtr;           ///< Row pointers (size: numRows + 1)
+    int* colIdx;           ///< Column indices (size: nnz)
+    FloatType* values;     ///< Values (size: nnz)
+
+    // CSR5-specific tile metadata
+    int sigma;             ///< Tile size (NNZ per tile, typically 256)
+    int numTiles;          ///< Number of tiles = ceil(nnz / sigma)
+    int* tile_row_ptr;     ///< Row index for each tile start (size: numTiles)
+    int* tile_nnz_offset;  ///< NNZ offset within start row (size: numTiles)
+
+    // Device pointers
+    int* d_rowPtr;
+    int* d_colIdx;
+    FloatType* d_values;
+    int* d_tile_row_ptr;
+    int* d_tile_nnz_offset;
+
+    // Memory ownership flags
+    bool ownsCsrData;      ///< Whether this struct owns CSR arrays
+    bool ownsTileData;     ///< Whether this struct owns tile metadata
+    bool ownsDeviceMemory;
+
+    // Conversion timing info
+    double conversionTimeMs; ///< Time spent in CSR->CSR5 conversion (ms)
+
+    // Default constructor
+    CSR5Matrix() : numRows(0), numCols(0), nnz(0),
+                   rowPtr(nullptr), colIdx(nullptr), values(nullptr),
+                   sigma(256), numTiles(0),
+                   tile_row_ptr(nullptr), tile_nnz_offset(nullptr),
+                   d_rowPtr(nullptr), d_colIdx(nullptr), d_values(nullptr),
+                   d_tile_row_ptr(nullptr), d_tile_nnz_offset(nullptr),
+                   ownsCsrData(false), ownsTileData(false),
+                   ownsDeviceMemory(false),
+                   conversionTimeMs(0.0) {}
+
+    // Destructor
+    ~CSR5Matrix() {
+        if (ownsCsrData) {
+            free(rowPtr);
+            free(colIdx);
+            free(values);
+        }
+        if (ownsTileData) {
+            free(tile_row_ptr);
+            free(tile_nnz_offset);
+        }
+        if (ownsDeviceMemory) {
+            CUDA_CHECK_NO_RETURN(cudaFree(d_tile_row_ptr));
+            CUDA_CHECK_NO_RETURN(cudaFree(d_tile_nnz_offset));
+            if (ownsCsrData) {
+                CUDA_CHECK_NO_RETURN(cudaFree(d_rowPtr));
+                CUDA_CHECK_NO_RETURN(cudaFree(d_colIdx));
+                CUDA_CHECK_NO_RETURN(cudaFree(d_values));
+            }
+        }
+    }
+
+    // Reference CSR data from existing CSRMatrix (no copy)
+    void referenceFromCSR(const CSRMatrix<FloatType>& csr) {
+        numRows = csr.numRows;
+        numCols = csr.numCols;
+        nnz = csr.nnz;
+        rowPtr = csr.rowPtr;
+        colIdx = csr.colIdx;
+        values = csr.values;
+        d_rowPtr = csr.d_rowPtr;
+        d_colIdx = csr.d_colIdx;
+        d_values = csr.d_values;
+        ownsCsrData = false;
+    }
+
+    // Allocate tile metadata (host)
+    void allocateTileMetadata(int tileCount) {
+        numTiles = tileCount;
+        tile_row_ptr = (int*)malloc(numTiles * sizeof(int));
+        tile_nnz_offset = (int*)malloc(numTiles * sizeof(int));
+        ownsTileData = true;
+    }
+
+    // Allocate tile metadata (device)
+    void allocateDeviceTileMetadata() {
+        CUDA_CHECK_NO_RETURN(cudaMalloc(&d_tile_row_ptr, numTiles * sizeof(int)));
+        CUDA_CHECK_NO_RETURN(cudaMalloc(&d_tile_nnz_offset, numTiles * sizeof(int)));
+        ownsDeviceMemory = true;
+    }
+
+    // Copy tile metadata to device
+    void copyTileMetadataToDevice(cudaStream_t stream = 0) {
+        cudaMemcpyAsync(d_tile_row_ptr, tile_row_ptr,
+                        numTiles * sizeof(int), cudaMemcpyHostToDevice, stream);
+        cudaMemcpyAsync(d_tile_nnz_offset, tile_nnz_offset,
+                        numTiles * sizeof(int), cudaMemcpyHostToDevice, stream);
+    }
+};
+
 // Format conversion utilities
 template<typename FloatType>
 CSRMatrix<FloatType> coo_to_csr(const COOMatrix<FloatType>& coo);
@@ -277,6 +394,14 @@ COOMatrix<FloatType> csr_to_coo(const CSRMatrix<FloatType>& csr);
 
 template<typename FloatType, int BlockSize>
 CSRMatrix<FloatType> bsr_to_csr(const BSRMatrix<FloatType, BlockSize>& bsr);
+
+// CSR5 conversion
+template<typename FloatType>
+spmv_status_t convertCSRToCSR5(
+    const CSRMatrix<FloatType>& csr,
+    CSR5Matrix<FloatType>& csr5,
+    int sigma = 256,
+    cudaStream_t stream = 0);
 
 } // namespace muxi_spmv
 

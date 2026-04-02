@@ -48,6 +48,7 @@ typedef enum {
     SPMV_FORMAT_COO = 1,
     SPMV_FORMAT_CSR2 = 2,  // Tensor Core optimized format
     SPMV_FORMAT_BSR = 3,
+    SPMV_FORMAT_CSR5 = 4,  // CSR5 load-balanced format
     SPMV_FORMAT_UNKNOWN = -1
 } spmv_format_t;
 

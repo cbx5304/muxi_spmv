@@ -4,6 +4,7 @@
  */
 
 #include "benchmark/performance_benchmark.h"
+#include "spmv/csr5/spmv_csr5.cuh"
 #include <cstdio>
 #include <cmath>
 #include <vector>
@@ -268,10 +269,18 @@ void printPerformanceResult(const PerformanceResult& result) {
     printf("Matrix: %d x %d, NNZ: %d, Sparsity: %.4f%%\n",
            result.numRows, result.numCols, result.nnz, result.sparsity * 100);
     printf("Device: %d, Warp Size: %d\n", result.deviceId, result.warpSize);
+    if (result.useCSR5) {
+        printf("Format: CSR5 (tiles: %d, sigma: %d)\n", result.numTiles, result.tileSize);
+        printf("Conversion Time: %.4f ms (%.1f%% overhead)\n",
+               result.conversionTimeMs, result.conversionOverheadPercent);
+    }
     printf("\n");
     printf("Time (median): %.4f ms\n", result.timeMs);
     printf("Time (min/max): %.4f / %.4f ms\n", result.minTimeMs, result.maxTimeMs);
     printf("Time (avg/std): %.4f / %.4f ms\n", result.avgTimeMs, result.stdDevMs);
+    if (result.useCSR5) {
+        printf("Total Time (incl. conversion): %.4f ms\n", result.totalTimeMs);
+    }
     printf("\n");
     printf("GFLOPS: %.2f\n", result.gflops);
     printf("Bandwidth: %.2f GB/s\n", result.bandwidthGBs);
@@ -328,6 +337,150 @@ template spmv_status_t measureCSRPerformance<float>(
 template spmv_status_t measureCSRPerformance<double>(
     const CSRMatrix<double>&, const double*, double*,
     const BenchmarkConfig&, spmv_handle_t*, PerformanceResult&);
+
+// ==================== CSR5 Performance Measurement ====================
+
+template<typename FloatType>
+spmv_status_t measureCSR5Performance(
+    CSRMatrix<FloatType>& csr,
+    CSR5Matrix<FloatType>& csr5,
+    const FloatType* d_x,
+    FloatType* d_y,
+    const BenchmarkConfig& config,
+    spmv_handle_t* handle,
+    PerformanceResult& result,
+    int sigma)
+{
+    // Initialize result with CSR5 fields
+    result.useCSR5 = true;
+    result.numRows = csr.numRows;
+    result.numCols = csr.numCols;
+    result.nnz = csr.nnz;
+    result.sparsity = static_cast<double>(csr.nnz) / (csr.numRows * csr.numCols);
+    result.deviceId = handle->deviceId;
+    result.warpSize = handle->warpSize;
+    result.iterations = config.measureIterations;
+    result.tileSize = sigma;  // Will be updated after conversion
+
+    // Get peak bandwidth
+    int memoryClock, busWidth;
+    cudaDeviceGetAttribute(&memoryClock, cudaDevAttrMemoryClockRate, handle->deviceId);
+    cudaDeviceGetAttribute(&busWidth, cudaDevAttrGlobalMemoryBusWidth, handle->deviceId);
+    result.peakBandwidthGBs = 2.0 * memoryClock * (busWidth / 8) / 1e6;
+
+    // Create CUDA events
+    cudaEvent_t start, stop;
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+
+    // Step 1: Measure conversion time
+    CUDA_CHECK(cudaEventRecord(start, config.stream));
+    spmv_status_t status = csr5_preprocess<FloatType>(csr, csr5, sigma, config.stream);
+    CUDA_CHECK(cudaEventRecord(stop, config.stream));
+    CUDA_CHECK(cudaEventSynchronize(stop));
+
+    if (status != SPMV_SUCCESS) {
+        cudaEventDestroy(start);
+        cudaEventDestroy(stop);
+        return status;
+    }
+
+    float convTimeMs;
+    CUDA_CHECK(cudaEventElapsedTime(&convTimeMs, start, stop));
+    result.conversionTimeMs = convTimeMs;
+    result.numTiles = csr5.numTiles;
+    result.tileSize = csr5.sigma;
+
+    // Step 2: Measure SpMV execution time
+    spmv_opts_t opts = spmv_default_opts();
+    opts.sync = config.syncAfterEach ? 1 : 0;
+
+    std::vector<double> times;
+    times.reserve(config.measureIterations);
+
+    // Warmup iterations
+    for (int i = 0; i < config.warmupIterations; i++) {
+        status = spmv_csr5<FloatType>(csr5, d_x, d_y, 1.0f, 0.0f, opts);
+        if (status != SPMV_SUCCESS) {
+            cudaEventDestroy(start);
+            cudaEventDestroy(stop);
+            return status;
+        }
+    }
+
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    // Measurement iterations
+    for (int i = 0; i < config.measureIterations; i++) {
+        CUDA_CHECK(cudaEventRecord(start, config.stream));
+
+        status = spmv_csr5<FloatType>(csr5, d_x, d_y, 1.0f, 0.0f, opts);
+        if (status != SPMV_SUCCESS) {
+            cudaEventDestroy(start);
+            cudaEventDestroy(stop);
+            return status;
+        }
+
+        CUDA_CHECK(cudaEventRecord(stop, config.stream));
+        CUDA_CHECK(cudaEventSynchronize(stop));
+
+        float timeMs;
+        CUDA_CHECK(cudaEventElapsedTime(&timeMs, start, stop));
+        times.push_back(static_cast<double>(timeMs));
+    }
+
+    // Calculate statistics
+    calculateStats(times, result.minTimeMs, result.maxTimeMs,
+                   result.avgTimeMs, result.stdDevMs);
+
+    // Use median time
+    std::sort(times.begin(), times.end());
+    result.timeMs = times[times.size() / 2];
+
+    // Calculate total time
+    result.totalTimeMs = result.timeMs + result.conversionTimeMs;
+    result.conversionOverheadPercent = (result.conversionTimeMs / result.timeMs) * 100.0;
+
+    // Calculate performance metrics
+    int floatBytes = sizeof(FloatType);
+    result.gflops = calculateGFlops(csr.nnz, result.timeMs);
+    result.bandwidthGBs = calculateBandwidth(csr.nnz, csr.numRows, csr.numCols,
+                                              result.timeMs, floatBytes);
+    result.bandwidthUtilization = result.bandwidthGBs / result.peakBandwidthGBs * 100.0;
+
+    // Correctness check
+    if (config.checkCorrectness) {
+        FloatType* h_y = new FloatType[csr.numRows];
+        CUDA_CHECK(cudaMemcpy(h_y, d_y, csr.numRows * sizeof(FloatType),
+                              cudaMemcpyDeviceToHost));
+
+        result.correctnessPassed = true;
+        for (int i = 0; i < csr.numRows; i++) {
+            if (std::isnan(h_y[i]) || std::isinf(h_y[i])) {
+                result.correctnessPassed = false;
+                break;
+            }
+        }
+        delete[] h_y;
+    } else {
+        result.correctnessPassed = true;
+    }
+
+    // Cleanup
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
+
+    return SPMV_SUCCESS;
+}
+
+// Explicit template instantiation for CSR5
+template spmv_status_t measureCSR5Performance<float>(
+    CSRMatrix<float>&, CSR5Matrix<float>&, const float*, float*,
+    const BenchmarkConfig&, spmv_handle_t*, PerformanceResult&, int);
+
+template spmv_status_t measureCSR5Performance<double>(
+    CSRMatrix<double>&, CSR5Matrix<double>&, const double*, double*,
+    const BenchmarkConfig&, spmv_handle_t*, PerformanceResult&, int);
 
 } // namespace benchmark
 } // namespace muxi_spmv

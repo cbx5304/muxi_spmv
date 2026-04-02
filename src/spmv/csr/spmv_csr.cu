@@ -85,30 +85,68 @@ spmv_status_t spmv_csr<float>(
         matrix.numRows, matrix.nnz, avgNnzPerRow, WARP_SIZE);
 
     if (WARP_SIZE == 64) {
-        // Domestic GPU kernel - ALWAYS use vector kernel for warp=64
-        // Scalar kernel is extremely inefficient on warp=64 architecture
+        // Domestic GPU kernel - warp size = 64
+        // Use adaptive strategy based on matrix sparsity
         int blockSize = config.blockSize;
-        // For vector kernel: each warp processes one row
-        // Each block has (blockSize / warpSize) warps
         int warpsPerBlock = blockSize / WARP_SIZE;
-        int gridSize = getGridSize(matrix.numRows, warpsPerBlock);
 
         if (opts.operation == SPMV_OP_TRANSPOSE) {
+            int gridSize = getGridSize(matrix.numRows, blockSize);
             spmv_csr_scalar_kernel<float, true><<<gridSize, blockSize, 0, stream>>>(
                 matrix.numRows, matrix.numCols, matrix.nnz,
                 matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
                 x, y);
         } else {
-            // Always use vector kernel for warp=64
-            // Even for very sparse rows, vector kernel outperforms scalar
-            // because it utilizes all 64 threads in a warp
-            spmv_csr_vector_kernel<float, 64, false><<<gridSize, blockSize, 0, stream>>>(
-                matrix.numRows, matrix.numCols, matrix.nnz,
-                matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
-                x, y);
+            // For very sparse matrices (avgNnzPerRow < 8), use light balanced kernel
+            // where each thread handles multiple rows, achieving full thread utilization
+            if (avgNnzPerRow < 8) {
+                // Calculate optimal rows per thread based on sparsity
+                // Goal: each thread processes ~8-16 elements for efficiency
+                int rowsPerThread = max(1, min(16, 8 / max(1, avgNnzPerRow)));
+
+                // Ensure we launch enough threads to utilize all SMs
+                int numSMs = 104;  // Mars X201 has 104 SMs
+                int minThreads = numSMs * 16;  // At least 16 warps per SM
+
+                // Calculate grid size based on rows
+                int totalThreads = (matrix.numRows + rowsPerThread - 1) / rowsPerThread;
+                totalThreads = max(totalThreads, minThreads);
+
+                int gridSize = (totalThreads + blockSize - 1) / blockSize;
+
+                // Use the appropriate kernel based on rows per thread
+                if (rowsPerThread <= 2) {
+                    spmv_csr_light_balanced_kernel<float, 256, 2><<<gridSize, blockSize, 0, stream>>>(
+                        matrix.numRows, matrix.numCols, matrix.nnz,
+                        matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
+                        x, y);
+                } else if (rowsPerThread <= 4) {
+                    spmv_csr_light_balanced_kernel<float, 256, 4><<<gridSize, blockSize, 0, stream>>>(
+                        matrix.numRows, matrix.numCols, matrix.nnz,
+                        matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
+                        x, y);
+                } else if (rowsPerThread <= 8) {
+                    spmv_csr_light_balanced_kernel<float, 256, 8><<<gridSize, blockSize, 0, stream>>>(
+                        matrix.numRows, matrix.numCols, matrix.nnz,
+                        matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
+                        x, y);
+                } else {
+                    spmv_csr_light_balanced_kernel<float, 256, 16><<<gridSize, blockSize, 0, stream>>>(
+                        matrix.numRows, matrix.numCols, matrix.nnz,
+                        matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
+                        x, y);
+                }
+            } else {
+                // For denser matrices: vector kernel (1 warp per row)
+                int gridSize = getGridSize(matrix.numRows, warpsPerBlock);
+                spmv_csr_vector_kernel<float, 64, false><<<gridSize, blockSize, 0, stream>>>(
+                    matrix.numRows, matrix.numCols, matrix.nnz,
+                    matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
+                    x, y);
+            }
         }
     } else {
-        // NVIDIA GPU kernel
+        // NVIDIA GPU kernel - warp size = 32
         int blockSize = config.blockSize;
         int gridSize = getGridSize(
             (matrix.numRows * 32 + blockSize - 1) / 32, blockSize);
@@ -170,24 +208,56 @@ spmv_status_t spmv_csr<double>(
         matrix.numRows, matrix.nnz, avgNnzPerRow, WARP_SIZE);
 
     if (WARP_SIZE == 64) {
+        // Domestic GPU kernel - warp size = 64
         int blockSize = config.blockSize;
-        // For vector kernel: each warp processes one row
         int warpsPerBlock = blockSize / WARP_SIZE;
-        int gridSize = getGridSize(matrix.numRows, warpsPerBlock);
 
         if (opts.operation == SPMV_OP_TRANSPOSE) {
+            int gridSize = getGridSize(matrix.numRows, blockSize);
             spmv_csr_scalar_kernel<double, true><<<gridSize, blockSize, 0, stream>>>(
                 matrix.numRows, matrix.numCols, matrix.nnz,
                 matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
                 x, y);
         } else {
-            // Always use vector kernel for warp=64
-            spmv_csr_vector_kernel<double, 64, false><<<gridSize, blockSize, 0, stream>>>(
-                matrix.numRows, matrix.numCols, matrix.nnz,
-                matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
-                x, y);
+            SpMVStrategy strategy = selectStrategy(avgNnzPerRow, matrix.numRows, matrix.nnz);
+
+            switch (strategy) {
+                case SpMVStrategy::LIGHT_BALANCED: {
+                    int rowsPerThread = max(1, min(16, WARP_SIZE / max(1, avgNnzPerRow)));
+                    int totalThreads = (matrix.numRows + rowsPerThread - 1) / rowsPerThread;
+                    int gridSize = getGridSize(totalThreads, blockSize);
+
+                    if (rowsPerThread <= 4) {
+                        spmv_csr_light_balanced_kernel<double, 256, 4><<<gridSize, blockSize, 0, stream>>>(
+                            matrix.numRows, matrix.numCols, matrix.nnz,
+                            matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
+                            x, y);
+                    } else if (rowsPerThread <= 8) {
+                        spmv_csr_light_balanced_kernel<double, 256, 8><<<gridSize, blockSize, 0, stream>>>(
+                            matrix.numRows, matrix.numCols, matrix.nnz,
+                            matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
+                            x, y);
+                    } else {
+                        spmv_csr_light_balanced_kernel<double, 256, 16><<<gridSize, blockSize, 0, stream>>>(
+                            matrix.numRows, matrix.numCols, matrix.nnz,
+                            matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
+                            x, y);
+                    }
+                    break;
+                }
+                case SpMVStrategy::VECTOR:
+                default: {
+                    int gridSize = getGridSize(matrix.numRows, warpsPerBlock);
+                    spmv_csr_vector_kernel<double, 64, false><<<gridSize, blockSize, 0, stream>>>(
+                        matrix.numRows, matrix.numCols, matrix.nnz,
+                        matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
+                        x, y);
+                    break;
+                }
+            }
         }
     } else {
+        // NVIDIA GPU kernel - warp size = 32
         int blockSize = config.blockSize;
         int gridSize = getGridSize(
             (matrix.numRows * 32 + blockSize - 1) / 32, blockSize);
