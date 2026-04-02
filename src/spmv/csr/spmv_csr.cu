@@ -97,16 +97,27 @@ spmv_status_t spmv_csr<float>(
                 matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
                 x, y);
         } else {
-            // For very sparse matrices (avgNnzPerRow < 8), use light balanced kernel
-            // where each thread handles multiple rows, achieving full thread utilization
-            if (avgNnzPerRow < 8) {
-                // Calculate optimal rows per thread based on sparsity
-                // Goal: each thread processes ~8-16 elements for efficiency
-                int rowsPerThread = max(1, min(16, 8 / max(1, avgNnzPerRow)));
+            // Mars X201 optimization: Use light-balanced kernel for wider range
+            // Key insight: Vector kernel with warp=64 is inefficient for avgNnz < 32
+            // because most threads in the warp are idle.
+            //
+            // Theoretical utilization for vector kernel = avgNnzPerRow / warpSize
+            // For avgNnz=10, warp=64: 10/64 = 15.6% max utilization
+            //
+            // Light-balanced kernel: Each thread processes multiple rows
+            // Better thread utilization, no warp coordination overhead
+
+            // Use light-balanced kernel for avgNnzPerRow < 32 (not just < 8)
+            // For avgNnzPerRow >= 32, vector kernel starts to become efficient
+            if (avgNnzPerRow < 32) {
+                // Calculate optimal rows per thread
+                // Goal: Each thread processes ~32 elements to match warp size
+                // rowsPerThread = warpSize / avgNnzPerRow gives good balance
+                int rowsPerThread = max(1, min(32, 64 / max(1, avgNnzPerRow)));
 
                 // Ensure we launch enough threads to utilize all SMs
                 int numSMs = 104;  // Mars X201 has 104 SMs
-                int minThreads = numSMs * 16;  // At least 16 warps per SM
+                int minThreads = numSMs * 8;  // At least 8 warps per SM for occupancy
 
                 // Calculate grid size based on rows
                 int totalThreads = (matrix.numRows + rowsPerThread - 1) / rowsPerThread;
@@ -130,14 +141,20 @@ spmv_status_t spmv_csr<float>(
                         matrix.numRows, matrix.numCols, matrix.nnz,
                         matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
                         x, y);
-                } else {
+                } else if (rowsPerThread <= 16) {
                     spmv_csr_light_balanced_kernel<float, 256, 16><<<gridSize, blockSize, 0, stream>>>(
+                        matrix.numRows, matrix.numCols, matrix.nnz,
+                        matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
+                        x, y);
+                } else {
+                    spmv_csr_light_balanced_kernel<float, 256, 32><<<gridSize, blockSize, 0, stream>>>(
                         matrix.numRows, matrix.numCols, matrix.nnz,
                         matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
                         x, y);
                 }
             } else {
-                // For denser matrices: vector kernel (1 warp per row)
+                // For denser matrices (avgNnz >= 32): vector kernel (1 warp per row)
+                // Now warp utilization is at least 32/64 = 50%
                 int gridSize = getGridSize(matrix.numRows, warpsPerBlock);
                 spmv_csr_vector_kernel<float, 64, false><<<gridSize, blockSize, 0, stream>>>(
                     matrix.numRows, matrix.numCols, matrix.nnz,
@@ -223,8 +240,16 @@ spmv_status_t spmv_csr<double>(
 
             switch (strategy) {
                 case SpMVStrategy::LIGHT_BALANCED: {
-                    int rowsPerThread = max(1, min(16, WARP_SIZE / max(1, avgNnzPerRow)));
+                    // Calculate optimal rows per thread
+                    // Goal: Each thread processes ~32-64 elements to maximize efficiency
+                    int rowsPerThread = max(1, min(32, 64 / max(1, avgNnzPerRow)));
                     int totalThreads = (matrix.numRows + rowsPerThread - 1) / rowsPerThread;
+
+                    // Ensure minimum thread count for SM utilization
+                    int numSMs = 104;
+                    int minThreads = numSMs * 8;
+                    totalThreads = max(totalThreads, minThreads);
+
                     int gridSize = getGridSize(totalThreads, blockSize);
 
                     if (rowsPerThread <= 4) {
@@ -237,8 +262,13 @@ spmv_status_t spmv_csr<double>(
                             matrix.numRows, matrix.numCols, matrix.nnz,
                             matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
                             x, y);
-                    } else {
+                    } else if (rowsPerThread <= 16) {
                         spmv_csr_light_balanced_kernel<double, 256, 16><<<gridSize, blockSize, 0, stream>>>(
+                            matrix.numRows, matrix.numCols, matrix.nnz,
+                            matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
+                            x, y);
+                    } else {
+                        spmv_csr_light_balanced_kernel<double, 256, 32><<<gridSize, blockSize, 0, stream>>>(
                             matrix.numRows, matrix.numCols, matrix.nnz,
                             matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
                             x, y);

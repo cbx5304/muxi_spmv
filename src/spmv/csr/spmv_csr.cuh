@@ -586,15 +586,21 @@ enum class SpMVStrategy {
 };
 
 inline SpMVStrategy selectStrategy(int avgNnzPerRow, int numRows, int nnz) {
+    // For Mars X201 (warp=64), use light-balanced for avgNnz < 32
+    // Reason: Vector kernel utilization = avgNnzPerRow / 64
+    // For avgNnz=10: 10/64 = 15.6% max utilization
+    // Light-balanced can achieve much better thread utilization
+
     // For very sparse matrices
-    if (avgNnzPerRow < 4) {
+    if (avgNnzPerRow < 8) {
         return SpMVStrategy::LIGHT_BALANCED;
     }
-    // For moderately sparse
-    if (avgNnzPerRow < 16) {
+    // For moderately sparse (Mars X201 needs light-balanced for < 32)
+    if (avgNnzPerRow < 32) {
         return SpMVStrategy::LIGHT_BALANCED;
     }
-    // For denser matrices, vector kernel is optimal
+    // For denser matrices (avgNnz >= 32), vector kernel is optimal
+    // Vector kernel utilization now at least 32/64 = 50%
     return SpMVStrategy::VECTOR;
 }
 
