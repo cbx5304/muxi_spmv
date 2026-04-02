@@ -75,12 +75,10 @@ Through systematic testing, we identified multiple bottlenecks:
 
 **Reason**: Overhead of loading x into shared memory exceeded benefits.
 
-### 4. Read-Only Cache Hint
-**Approach**: Use __ldg() intrinsic for x vector access.
+### 4. Read-Only Cache Hint (__ldg)
+**Approach**: Use __ldg() intrinsic for read-only data access.
 
-**Result**: No significant improvement.
-
-**Reason**: Mars X201's cache architecture doesn't benefit from this hint.
+**Result**: No improvement - Mars X201's cache architecture doesn't benefit from this hint.
 
 ### 5. Scalar Kernel (Final Solution)
 **Approach**: Use simple one-thread-per-row kernel, same as NVIDIA uses for sparse matrices.
@@ -88,6 +86,13 @@ Through systematic testing, we identified multiple bottlenecks:
 **Result**: **Best improvement** - 43% over batched kernel (6.8% → 9.8%).
 
 **Why it works**: Eliminates batch loop overhead, allows GPU to handle memory access patterns directly.
+
+### 6. ELLPACK Format
+**Approach**: Use fixed-width format for coalesced memory access.
+
+**Result**: Only 1.06x improvement with 180% memory overhead.
+
+**Finding**: Not suitable for matrices with variable row lengths due to excessive padding.
 
 ## Comparison with RTX 4090
 
