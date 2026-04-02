@@ -361,11 +361,6 @@ spmv_status_t spmv_csr5(
     return SPMV_SUCCESS;
 }
 
-// Note: Template instantiation happens implicitly when compiling with test_runner
-// Explicit instantiation removed for domestic GPU cu-bridge compatibility
-
-} // namespace muxi_spmv
-
 // ==================== Optimized CSR5 Kernel with Warp Aggregation ====================
 
 /**
