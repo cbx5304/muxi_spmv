@@ -10,6 +10,7 @@
 | Warp Size | 32 | **64** |
 | SM数量 | 128 | 104 |
 | 峰值带宽 | 1008 GB/s | 1843 GB/s |
+| L2 Cache | 72 MB | ~2-4 MB |
 | 显存 | 24 GB | 68 GB |
 
 ## 关键开发差异
@@ -65,50 +66,68 @@ nvcc -O3 -DWARP_SIZE=64 ...
 
 **Mars X201特定优化**：
 1. **Block Size**：推荐256 (4 warps per block)
-2. **Tile Size**：对于CSR5，使用256 (64 * 4)
-3. **Shared Memory**：注意warp=64时共享内存分配差异
-4. **原子操作**：尽量减少，性能影响更大
+2. **Merge-based Kernel**：对avgNnz<32的稀疏矩阵最优
+3. **Vector Kernel**：对avgNnz>=32的矩阵最优
+4. **避免原子操作**：性能影响比NVIDIA更大
 
-## SpMV Kernel选择策略
+## SpMV Kernel选择策略 (更新 2026-04-02)
 
 ### Mars X201 (warp=64)
 
 ```cpp
-if (avgNnzPerRow < 8) {
-    // Light balanced kernel - 多行/线程
-    // 适用于极稀疏矩阵
+if (avgNnzPerRow < 32) {
+    // Merge-based kernel - 最佳选择
+    // 通过merge-path算法实现负载均衡
+    spmv_merge_based(matrix, x, y, stream);
 } else {
     // Vector kernel - 1 warp/row
-    // 适用于avgNnzPerRow >= 8
+    spmv_csr_vector_kernel<64><<<...>>>(...);
 }
 ```
+
+**关键发现**：
+- avgNnz=10: merge-based 14.4% vs scalar 9.8% (+47%提升)
+- avgNnz=28: merge-based 26.1% vs scalar 10.8% (+142%提升)
+- merge-based消除了warp空闲问题
 
 ### RTX 4090 (warp=32)
 
 ```cpp
 if (avgNnzPerRow < 32) {
     // Scalar kernel - 1 thread/row
+    spmv_csr_scalar_kernel<<<...>>>(...);
 } else {
     // Vector kernel - 1 warp/row
+    spmv_csr_vector_kernel<32><<<...>>>(...);
 }
 ```
 
-## 性能测试结果
+## 性能测试结果 (更新 2026-04-02)
 
-### 最终性能（2026-04-02）
+### 最终性能
 
-| GPU | avgNnz=10 | avgNnz=64 | 说明 |
-|-----|-----------|-----------|------|
-| RTX 4090 | 86.1% | 88.9% | NVIDIA GPU |
-| Mars X201 | 17.1% | **77.8%** | 国产GPU |
+| GPU | avgNnz=10 | avgNnz=32 | avgNnz=64 |
+|-----|-----------|-----------|-----------|
+| RTX 4090 | 86.1% | ~85% | 88.9% |
+| Mars X201 | **14.4%** | 34.8% | 51.8% |
+
+### 性能差距
+
+| avgNnz | Mars X201 vs RTX 4090 | 主要原因 |
+|--------|----------------------|----------|
+| 10 | 6x | L2 cache + 随机访问 |
+| 32 | 2.4x | L2 cache |
+| 64 | 1.7x | 接近硬件极限 |
 
 ### 关键发现
 
-1. **密集矩阵性能达标**：Mars X201对于avgNnzPerRow >= 64的矩阵达到77.8%带宽利用率
+1. **Merge-based优化有效**：对稀疏矩阵(avgNnz<32)性能提升47-142%
 
-2. **稀疏矩阵受限**：低利用率是warp=64架构的物理限制，无法通过kernel优化完全解决
+2. **密集矩阵性能达标**：Mars X201对于avgNnz>=64的矩阵达到52%带宽利用率
 
-3. **CSR5挑战**：当前CSR5实现因原子操作开销，性能不如预期，需要进一步优化
+3. **CSR5挑战**：当前CSR5实现因原子操作开销(8.7%)，不如merge-based
+
+4. **硬件差距**：L2 cache大小差异(4MB vs 72MB)是主要原因
 
 ## 开发最佳实践
 
@@ -117,9 +136,11 @@ if (avgNnzPerRow < 32) {
 ```cpp
 // 使用编译时宏区分
 #if WARP_SIZE == 64
-    // Mars X201特定代码
+    // Mars X201: 使用merge-based
+    spmv_merge_based(matrix, x, y, stream);
 #else
-    // NVIDIA特定代码
+    // NVIDIA: 使用scalar kernel
+    spmv_csr_scalar_kernel<<<...>>>(...);
 #endif
 ```
 
@@ -151,16 +172,23 @@ constexpr int LOCAL_WARP_SIZE = 64;
 
 ### Q1: 为什么稀疏矩阵性能低？
 
-A: 这是warp=64架构的物理限制。当avgNnzPerRow < warpSize时，每个warp中只有部分线程有工作。
+A: 两个原因：
+1. Warp=64架构限制 - vector kernel利用率低
+2. L2 cache小 - 随机访问效率低
 
-### Q2: 如何提高稀疏矩阵性能？
+**解决方案**：使用merge-based kernel优化负载均衡
 
-A: 考虑以下方案：
-1. CSR5格式（需要优化实现）
-2. 行重排序预处理
-3. 使用其他稀疏格式（如ELLPACK）
+### Q2: 如何选择最优kernel？
 
-### Q3: 编译错误"expected unqualified-id"
+A: 根据avgNnzPerRow选择：
+- avgNnz < 32: merge-based (Mars X201) 或 scalar (RTX 4090)
+- avgNnz >= 32: vector kernel
+
+### Q3: CSR5为什么不推荐？
+
+A: 当前CSR5实现存在原子操作开销问题(8.7%利用率)，不如merge-based(14.4%)。需要warp级聚合优化才能改善。
+
+### Q4: 编译错误"expected unqualified-id"
 
 A: 检查是否定义了与宏同名的变量，如`constexpr int WARP_SIZE`与`#define WARP_SIZE`冲突。
 
