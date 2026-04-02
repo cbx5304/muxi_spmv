@@ -115,79 +115,51 @@ spmv_status_t spmv_csr<float>(
                 // rowsPerThread = warpSize / avgNnzPerRow gives good balance
                 int rowsPerThread = max(1, min(32, 64 / max(1, avgNnzPerRow)));
 
-                // For large matrices, use batched kernel to keep rowPtr in L2 cache
-                // Mars X201 L2 cache appears to be ~2-4MB, can handle ~300K rows
-                const int L2_CACHE_ROWS = 200000;  // Conservative estimate
+                // For large matrices, use scalar kernel (like NVIDIA does)
+                // This avoids the batch loop overhead
+                int blockSize = 256;
+                int totalThreads = matrix.numRows;  // One thread per row
+                int gridSize = (totalThreads + blockSize - 1) / blockSize;
 
-                if (matrix.numRows > L2_CACHE_ROWS) {
-                    // Use batched kernel for large matrices
-                    // Process in batches of 200K rows to keep rowPtr in cache
-                    const int BATCH_SIZE = 200000;
-                    int blockSize = 256;
-                    int gridSize = min(256, (L2_CACHE_ROWS + rowsPerThread * blockSize - 1) / (rowsPerThread * blockSize));
-
-                    // Select template based on rowsPerThread
-                    if (rowsPerThread <= 4) {
-                        spmv_csr_batched_kernel<float, 256, 4, BATCH_SIZE><<<gridSize, blockSize, 0, stream>>>(
-                            matrix.numRows, matrix.numCols, matrix.nnz,
-                            matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
-                            x, y);
-                    } else if (rowsPerThread <= 8) {
-                        spmv_csr_batched_kernel<float, 256, 8, BATCH_SIZE><<<gridSize, blockSize, 0, stream>>>(
-                            matrix.numRows, matrix.numCols, matrix.nnz,
-                            matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
-                            x, y);
-                    } else if (rowsPerThread <= 16) {
-                        spmv_csr_batched_kernel<float, 256, 16, BATCH_SIZE><<<gridSize, blockSize, 0, stream>>>(
-                            matrix.numRows, matrix.numCols, matrix.nnz,
-                            matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
-                            x, y);
-                    } else {
-                        spmv_csr_batched_kernel<float, 256, 32, BATCH_SIZE><<<gridSize, blockSize, 0, stream>>>(
-                            matrix.numRows, matrix.numCols, matrix.nnz,
-                            matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
-                            x, y);
-                    }
+                // Use scalar kernel for all large matrices
+                if (matrix.numRows > 100000) {
+                    spmv_csr_scalar_kernel<float, false><<<gridSize, blockSize, 0, stream>>>(
+                        matrix.numRows, matrix.numCols, matrix.nnz,
+                        matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
+                        x, y);
                 } else {
-                    // Use standard light-balanced kernel for smaller matrices
+                    // For smaller matrices, use light-balanced kernel
                     int actualRowsPerThread;
 
-                    if (rowsPerThread <= 2) {
-                        actualRowsPerThread = 2;
-                        int totalThreads = (matrix.numRows + actualRowsPerThread - 1) / actualRowsPerThread;
-                        int gridSize = max(1, (totalThreads + blockSize - 1) / blockSize);
-                        spmv_csr_light_balanced_kernel<float, 256, 2><<<gridSize, blockSize, 0, stream>>>(
-                            matrix.numRows, matrix.numCols, matrix.nnz,
-                            matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
-                            x, y);
-                    } else if (rowsPerThread <= 4) {
+                    if (rowsPerThread <= 4) {
                         actualRowsPerThread = 4;
-                        int totalThreads = (matrix.numRows + actualRowsPerThread - 1) / actualRowsPerThread;
-                        int gridSize = max(1, (totalThreads + blockSize - 1) / blockSize);
+                    } else if (rowsPerThread <= 8) {
+                        actualRowsPerThread = 8;
+                    } else if (rowsPerThread <= 16) {
+                        actualRowsPerThread = 16;
+                    } else {
+                        actualRowsPerThread = 32;
+                    }
+
+                    int totalThreads = (matrix.numRows + actualRowsPerThread - 1) / actualRowsPerThread;
+                    int gridSize = max(1, (totalThreads + blockSize - 1) / blockSize);
+
+                    if (actualRowsPerThread == 4) {
                         spmv_csr_light_balanced_kernel<float, 256, 4><<<gridSize, blockSize, 0, stream>>>(
                             matrix.numRows, matrix.numCols, matrix.nnz,
                             matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
                             x, y);
-                    } else if (rowsPerThread <= 8) {
-                        actualRowsPerThread = 8;
-                        int totalThreads = (matrix.numRows + actualRowsPerThread - 1) / actualRowsPerThread;
-                        int gridSize = max(1, (totalThreads + blockSize - 1) / blockSize);
+                    } else if (actualRowsPerThread == 8) {
                         spmv_csr_light_balanced_kernel<float, 256, 8><<<gridSize, blockSize, 0, stream>>>(
                             matrix.numRows, matrix.numCols, matrix.nnz,
                             matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
                             x, y);
-                    } else if (rowsPerThread <= 16) {
-                        actualRowsPerThread = 16;
-                        int totalThreads = (matrix.numRows + actualRowsPerThread - 1) / actualRowsPerThread;
-                        int gridSize = max(1, (totalThreads + blockSize - 1) / blockSize);
+                    } else if (actualRowsPerThread == 16) {
                         spmv_csr_light_balanced_kernel<float, 256, 16><<<gridSize, blockSize, 0, stream>>>(
                             matrix.numRows, matrix.numCols, matrix.nnz,
                             matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
                             x, y);
                     } else {
-                        actualRowsPerThread = 32;
-                        int totalThreads = (matrix.numRows + actualRowsPerThread - 1) / actualRowsPerThread;
-                        int gridSize = max(1, (totalThreads + blockSize - 1) / blockSize);
                         spmv_csr_light_balanced_kernel<float, 256, 32><<<gridSize, blockSize, 0, stream>>>(
                             matrix.numRows, matrix.numCols, matrix.nnz,
                             matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,

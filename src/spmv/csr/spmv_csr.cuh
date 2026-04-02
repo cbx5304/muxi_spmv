@@ -537,6 +537,215 @@ __global__ void spmv_csr5_kernel(
 }
 
 /**
+ * @brief Batched kernel with read-only cache hint for x vector
+ * Uses __ldg() to hint the compiler to use read-only cache for x
+ * This can improve performance on some architectures
+ */
+template<typename FloatType, int BLOCK_SIZE, int ROWS_PER_THREAD, int BATCH_SIZE>
+__global__ void spmv_csr_batched_rocache_kernel(
+    int numRows,
+    int numCols,
+    int nnz,
+    const int* __restrict__ rowPtr,
+    const int* __restrict__ colIdx,
+    const FloatType* __restrict__ values,
+    const FloatType* __restrict__ x,
+    FloatType* __restrict__ y)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int totalThreads = gridDim.x * blockDim.x;
+
+    // Calculate how many batches we need
+    int numBatches = (numRows + BATCH_SIZE - 1) / BATCH_SIZE;
+
+    // Process batches sequentially
+    for (int batch = 0; batch < numBatches; batch++) {
+        int batchStartRow = batch * BATCH_SIZE;
+        int batchEndRow = min(batchStartRow + BATCH_SIZE, numRows);
+
+        // Each thread processes ROWS_PER_THREAD rows within this batch
+        int rowsInBatch = batchEndRow - batchStartRow;
+        int threadsForBatch = (rowsInBatch + ROWS_PER_THREAD - 1) / ROWS_PER_THREAD;
+
+        // Process rows assigned to this thread in this batch
+        int localTid = tid;
+        while (localTid < threadsForBatch) {
+            int row = batchStartRow + localTid * ROWS_PER_THREAD;
+
+            for (int r = 0; r < ROWS_PER_THREAD; r++) {
+                int currentRow = row + r;
+                if (currentRow >= batchEndRow) break;
+
+                int rowStart = rowPtr[currentRow];
+                int rowEnd = rowPtr[currentRow + 1];
+
+                FloatType sum = static_cast<FloatType>(0);
+                for (int i = rowStart; i < rowEnd; i++) {
+                    // Use read-only cache hint for x access
+                    sum += values[i] * __ldg(&x[colIdx[i]]);
+                }
+                y[currentRow] = sum;
+            }
+
+            localTid += totalThreads;
+        }
+    }
+}
+
+/**
+ * @brief Batched kernel with shared memory cache for x vector
+ * Optimized for sparse matrices where x fits in shared memory
+ * Shared memory size: X_SHARED_SIZE elements (must be <= numCols)
+ */
+template<typename FloatType, int BLOCK_SIZE, int ROWS_PER_THREAD, int BATCH_SIZE, int X_SHARED_SIZE>
+__global__ void spmv_csr_batched_shared_kernel(
+    int numRows,
+    int numCols,
+    int nnz,
+    const int* __restrict__ rowPtr,
+    const int* __restrict__ colIdx,
+    const FloatType* __restrict__ values,
+    const FloatType* __restrict__ x,
+    FloatType* __restrict__ y)
+{
+    // Shared memory for x vector cache
+    __shared__ FloatType s_x[X_SHARED_SIZE];
+
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int totalThreads = gridDim.x * blockDim.x;
+
+    // Cooperatively load x into shared memory
+    // Each thread loads multiple elements if needed
+    for (int i = threadIdx.x; i < min(numCols, X_SHARED_SIZE); i += blockDim.x) {
+        s_x[i] = x[i];
+    }
+    __syncthreads();
+
+    // If numCols > X_SHARED_SIZE, we need to handle out-of-range accesses
+    // For now, assume numCols <= X_SHARED_SIZE
+
+    // Calculate how many batches we need
+    int numBatches = (numRows + BATCH_SIZE - 1) / BATCH_SIZE;
+
+    // Process batches sequentially
+    for (int batch = 0; batch < numBatches; batch++) {
+        int batchStartRow = batch * BATCH_SIZE;
+        int batchEndRow = min(batchStartRow + BATCH_SIZE, numRows);
+
+        // Each thread processes ROWS_PER_THREAD rows within this batch
+        int rowsInBatch = batchEndRow - batchStartRow;
+        int threadsForBatch = (rowsInBatch + ROWS_PER_THREAD - 1) / ROWS_PER_THREAD;
+
+        // Process rows assigned to this thread in this batch
+        int localTid = tid;
+        while (localTid < threadsForBatch) {
+            int row = batchStartRow + localTid * ROWS_PER_THREAD;
+
+            for (int r = 0; r < ROWS_PER_THREAD; r++) {
+                int currentRow = row + r;
+                if (currentRow >= batchEndRow) break;
+
+                int rowStart = rowPtr[currentRow];
+                int rowEnd = rowPtr[currentRow + 1];
+
+                FloatType sum = static_cast<FloatType>(0);
+                // Use shared memory for x access
+                for (int i = rowStart; i < rowEnd; i++) {
+                    int col = colIdx[i];
+                    // Access x from shared memory if in range
+                    if (col < X_SHARED_SIZE) {
+                        sum += values[i] * s_x[col];
+                    } else {
+                        // Fallback to global memory for out-of-range columns
+                        sum += values[i] * x[col];
+                    }
+                }
+                y[currentRow] = sum;
+            }
+
+            localTid += totalThreads;
+        }
+    }
+}
+
+/**
+ * @brief NNZ-based batched kernel for sparse matrices on warp=64
+ * Distributes work by NNZ chunks instead of row batches
+ * Each thread block processes a fixed chunk of NNZ elements
+ * This approach has O(NNZ) complexity, not O(numRows)
+ */
+template<typename FloatType, int BLOCK_SIZE, int NNZ_PER_BLOCK>
+__global__ void spmv_csr_nnz_batched_kernel(
+    int numRows,
+    int numCols,
+    int nnz,
+    const int* __restrict__ rowPtr,
+    const int* __restrict__ colIdx,
+    const FloatType* __restrict__ values,
+    const FloatType* __restrict__ x,
+    FloatType* __restrict__ y)
+{
+    int blockId = blockIdx.x;
+    int totalBlocks = gridDim.x;
+
+    // Calculate this block's NNZ range
+    int nnzPerBlock = (nnz + totalBlocks - 1) / totalBlocks;
+    int startNnz = blockId * nnzPerBlock;
+    int endNnz = min(startNnz + nnzPerBlock, nnz);
+
+    if (startNnz >= nnz) return;
+
+    // Find the starting row for this NNZ range using binary search
+    int startRow = 0;
+    int low = 0, high = numRows;
+    while (low < high) {
+        int mid = (low + high) / 2;
+        if (rowPtr[mid] <= startNnz) {
+            startRow = mid;
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+
+    // Process NNZ elements in this block's range
+    // Each thread processes a subset of the NNZ range
+    int tid = threadIdx.x;
+    int currentRow = startRow;
+    FloatType localSum = static_cast<FloatType>(0);
+    int currentRowStart = rowPtr[currentRow];
+    int currentRowEnd = rowPtr[currentRow + 1];
+
+    for (int idx = startNnz + tid; idx < endNnz; idx += BLOCK_SIZE) {
+        // Find which row this NNZ belongs to
+        while (idx >= currentRowEnd && currentRow < numRows - 1) {
+            currentRow++;
+            currentRowStart = rowPtr[currentRow];
+            currentRowEnd = rowPtr[currentRow + 1];
+        }
+
+        // Process this element
+        int col = colIdx[idx];
+        FloatType val = values[idx];
+
+        // Check if we're starting a new row
+        int nextIdx = idx + BLOCK_SIZE;
+        if (nextIdx < endNnz && nextIdx >= currentRowEnd) {
+            // Write current row's sum and reset
+            atomicAdd(&y[currentRow], localSum);
+            localSum = static_cast<FloatType>(0);
+        }
+
+        localSum += val * x[col];
+    }
+
+    // Write final sum
+    if (localSum != static_cast<FloatType>(0)) {
+        atomicAdd(&y[currentRow], localSum);
+    }
+}
+
+/**
  * @brief Batched kernel for sparse matrices on warp=64
  * Processes rows in batches to keep rowPtr data in L2 cache
  * Each batch processes BATCH_SIZE rows before moving to next batch
