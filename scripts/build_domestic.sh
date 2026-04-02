@@ -39,14 +39,20 @@ build_test_spmv() {
 
 build_test_runner() {
     echo "Building test_runner..."
-    # Compile all sources together to ensure template instantiation works
-    $NVCC $OPT_FLAGS $WARP_SIZE_FLAG $INCLUDE_FLAG \
+    # Use relocatable device code compilation for proper template instantiation
+    # Step 1: Compile each source to device-code-only object
+    $NVCC $OPT_FLAGS $WARP_SIZE_FLAG $INCLUDE_FLAG -dc \
         $CORE_SRCS \
         $GEN_SRCS \
         $BENCH_SRCS \
+        -o spmv_objs.o
+
+    # Step 2: Compile test_runner and link with device objects
+    $NVCC $OPT_FLAGS $WARP_SIZE_FLAG $INCLUDE_FLAG \
+        spmv_objs.o \
         tests/benchmark/test_runner.cu \
         -o test_runner \
-        -lcudart
+        -dl -lcudart
 }
 
 build_all() {
