@@ -15,7 +15,7 @@ INCLUDE_FLAG="-Isrc"
 SRC_DIR="src"
 
 # 核心源文件
-CORE_SRCS="$SRC_DIR/spmv/csr/spmv_csr.cu $SRC_DIR/spmv/csr5/spmv_csr5.cu $SRC_DIR/utils/device_info.cu $SRC_DIR/api/spmv_api.cu"
+CORE_SRCS="$SRC_DIR/spmv/csr/spmv_csr.cu $SRC_DIR/spmv/csr5/spmv_csr5.cu $SRC_DIR/spmv/ellpack/spmv_ellpack.cu $SRC_DIR/utils/device_info.cu $SRC_DIR/api/spmv_api.cu"
 
 # 生成器源文件
 GEN_SRCS="$SRC_DIR/generators/matrix_generator.cu $SRC_DIR/generators/mtx_io.cu"
@@ -62,10 +62,33 @@ build_test_runner() {
     rm -f $OBJ_FILES
 }
 
+build_test_ellpack() {
+    echo "Building test_ellpack..."
+    # Compile core sources
+    OBJ_FILES=""
+    for src in $CORE_SRCS $GEN_SRCS; do
+        obj=$(basename $src .cu).o
+        echo "Compiling $src..."
+        $NVCC $OPT_FLAGS $WARP_SIZE_FLAG $INCLUDE_FLAG -dc $src -o $obj
+        OBJ_FILES="$OBJ_FILES $obj"
+    done
+
+    # Step 2: Compile test_ellpack and device-link all objects
+    $NVCC $OPT_FLAGS $WARP_SIZE_FLAG $INCLUDE_FLAG \
+        tests/benchmark/test_ellpack.cu \
+        $OBJ_FILES \
+        -o test_ellpack \
+        -dl -lcudart
+
+    # Cleanup object files
+    rm -f $OBJ_FILES
+}
+
 build_all() {
     build_device_info
     build_test_spmv
     build_test_runner
+    build_test_ellpack
 }
 
 # 主入口
@@ -79,11 +102,14 @@ case "$1" in
     test_runner)
         build_test_runner
         ;;
+    test_ellpack)
+        build_test_ellpack
+        ;;
     all)
         build_all
         ;;
     *)
-        echo "Usage: $0 {device_info|test_spmv|test_runner|all}"
+        echo "Usage: $0 {device_info|test_spmv|test_runner|test_ellpack|all}"
         echo "Note: Run with CUDA_VISIBLE_DEVICES=7 for GPU execution"
         exit 1
         ;;

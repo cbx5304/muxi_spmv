@@ -96,15 +96,16 @@ __global__ void spmv_csr_scalar_kernel(
     if (row < numRows) {
         FloatType sum = static_cast<FloatType>(0);
 
-        int rowStart = rowPtr[row];
-        int rowEnd = rowPtr[row + 1];
+        // Use __ldg for read-only cache hints on arrays that benefit from caching
+        int rowStart = __ldg(&rowPtr[row]);
+        int rowEnd = __ldg(&rowPtr[row + 1]);
 
         for (int i = rowStart; i < rowEnd; i++) {
-            int col = colIdx[i];
+            int col = __ldg(&colIdx[i]);
             if (TRANSPOSE) {
-                atomicAdd(&y[col], values[i] * x[row]);
+                atomicAdd(&y[col], __ldg(&values[i]) * __ldg(&x[row]));
             } else {
-                sum += values[i] * x[col];
+                sum += __ldg(&values[i]) * __ldg(&x[col]);
             }
         }
 
@@ -665,6 +666,72 @@ __global__ void spmv_csr_batched_shared_kernel(
 
             localTid += totalThreads;
         }
+    }
+}
+
+/**
+ * @brief NNZ-chunked kernel for sparse matrices on warp=64
+ * Each thread block processes a fixed chunk of NNZ elements
+ * Threads cooperatively find row boundaries using binary search
+ * Uses atomics for row sums, optimized for scattered row access
+ */
+template<typename FloatType, int BLOCK_SIZE>
+__global__ void spmv_csr_nnz_chunked_kernel(
+    int numRows,
+    int numCols,
+    int nnz,
+    const int* __restrict__ rowPtr,
+    const int* __restrict__ colIdx,
+    const FloatType* __restrict__ values,
+    const FloatType* __restrict__ x,
+    FloatType* __restrict__ y)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int totalThreads = gridDim.x * blockDim.x;
+
+    // Each thread processes a chunk of NNZ elements
+    int chunkSize = (nnz + totalThreads - 1) / totalThreads;
+    int startNnz = min(tid * chunkSize, nnz);
+    int endNnz = min(startNnz + chunkSize, nnz);
+
+    if (startNnz >= nnz) return;
+
+    // Binary search to find starting row
+    int low = 0, high = numRows;
+    int currentRow = 0;
+    while (low < high) {
+        int mid = (low + high) / 2;
+        if (rowPtr[mid] <= startNnz) {
+            currentRow = mid;
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+
+    int currentRowEnd = rowPtr[currentRow + 1];
+    FloatType localSum = static_cast<FloatType>(0);
+
+    // Process NNZ elements
+    for (int idx = startNnz; idx < endNnz; idx++) {
+        // Check if we need to advance to next row
+        while (idx >= currentRowEnd && currentRow < numRows - 1) {
+            // Write previous row's sum
+            if (localSum != static_cast<FloatType>(0)) {
+                atomicAdd(&y[currentRow], localSum);
+                localSum = static_cast<FloatType>(0);
+            }
+            currentRow++;
+            currentRowEnd = rowPtr[currentRow + 1];
+        }
+
+        // Process this element
+        localSum += values[idx] * x[colIdx[idx]];
+    }
+
+    // Write final sum
+    if (localSum != static_cast<FloatType>(0)) {
+        atomicAdd(&y[currentRow], localSum);
     }
 }
 
