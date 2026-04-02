@@ -4,6 +4,7 @@
  */
 
 #include "spmv_csr.cuh"
+#include "../csr5/spmv_csr5.cuh"  // For merge-based kernel
 #include <cstdio>
 
 namespace muxi_spmv {
@@ -97,78 +98,28 @@ spmv_status_t spmv_csr<float>(
                 matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
                 x, y);
         } else {
-            // Mars X201 optimization: Use light-balanced kernel for wider range
-            // Key insight: Vector kernel with warp=64 is inefficient for avgNnz < 32
-            // because most threads in the warp are idle.
+            // Mars X201 optimization: Adaptive kernel selection based on sparsity
             //
-            // Theoretical utilization for vector kernel = avgNnzPerRow / warpSize
-            // For avgNnz=10, warp=64: 10/64 = 15.6% max utilization
+            // Key findings from benchmark tests (1M rows, 1K cols):
+            // - avgNnz=10: merge-based 14.9% vs scalar 9.8% (+52% improvement)
+            // - avgNnz=16: merge-based 19.7% vs light-balanced 9.6% (+105% improvement)
+            // - avgNnz=24: merge-based 24.7% vs light-balanced 10.7% (+131% improvement)
+            // - avgNnz=28: merge-based 24.8% vs light-balanced 10.8% (+130% improvement)
+            // - avgNnz=32: vector 37.0% vs merge-based 25.7% (+44% vector better)
+            // - avgNnz=64: vector 52.2% vs merge-based 44.8% (+16% vector better)
             //
-            // Light-balanced kernel: Each thread processes multiple rows
-            // Better thread utilization, no warp coordination overhead
+            // Strategy:
+            // - avgNnz < 32: Use merge-based (better for sparse matrices on warp=64)
+            // - avgNnz >= 32: Use vector kernel (optimal for denser matrices)
 
-            // Use light-balanced kernel for avgNnzPerRow < 32 (not just < 8)
-            // For avgNnzPerRow >= 32, vector kernel starts to become efficient
             if (avgNnzPerRow < 32) {
-                // Calculate optimal rows per thread
-                // Goal: Each thread processes ~32 elements to match warp size
-                // rowsPerThread = warpSize / avgNnzPerRow gives good balance
-                int rowsPerThread = max(1, min(32, 64 / max(1, avgNnzPerRow)));
-
-                // For large matrices, use scalar kernel (like NVIDIA does)
-                // This avoids the batch loop overhead
-                int blockSize = 256;
-                int totalThreads = matrix.numRows;  // One thread per row
-                int gridSize = (totalThreads + blockSize - 1) / blockSize;
-
-                // Use scalar kernel for all large matrices
-                if (matrix.numRows > 100000) {
-                    spmv_csr_scalar_kernel<float, false><<<gridSize, blockSize, 0, stream>>>(
-                        matrix.numRows, matrix.numCols, matrix.nnz,
-                        matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
-                        x, y);
-                } else {
-                    // For smaller matrices, use light-balanced kernel
-                    int actualRowsPerThread;
-
-                    if (rowsPerThread <= 4) {
-                        actualRowsPerThread = 4;
-                    } else if (rowsPerThread <= 8) {
-                        actualRowsPerThread = 8;
-                    } else if (rowsPerThread <= 16) {
-                        actualRowsPerThread = 16;
-                    } else {
-                        actualRowsPerThread = 32;
-                    }
-
-                    int totalThreads = (matrix.numRows + actualRowsPerThread - 1) / actualRowsPerThread;
-                    int gridSize = max(1, (totalThreads + blockSize - 1) / blockSize);
-
-                    if (actualRowsPerThread == 4) {
-                        spmv_csr_light_balanced_kernel<float, 256, 4><<<gridSize, blockSize, 0, stream>>>(
-                            matrix.numRows, matrix.numCols, matrix.nnz,
-                            matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
-                            x, y);
-                    } else if (actualRowsPerThread == 8) {
-                        spmv_csr_light_balanced_kernel<float, 256, 8><<<gridSize, blockSize, 0, stream>>>(
-                            matrix.numRows, matrix.numCols, matrix.nnz,
-                            matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
-                            x, y);
-                    } else if (actualRowsPerThread == 16) {
-                        spmv_csr_light_balanced_kernel<float, 256, 16><<<gridSize, blockSize, 0, stream>>>(
-                            matrix.numRows, matrix.numCols, matrix.nnz,
-                            matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
-                            x, y);
-                    } else {
-                        spmv_csr_light_balanced_kernel<float, 256, 32><<<gridSize, blockSize, 0, stream>>>(
-                            matrix.numRows, matrix.numCols, matrix.nnz,
-                            matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
-                            x, y);
-                    }
-                }
+                // Sparse matrices: Use merge-based kernel
+                // Merge-based divides work along merge path, providing better load balancing
+                // for sparse matrices on warp=64 architecture
+                spmv_merge_based<float>(matrix, x, y, stream);
             } else {
-                // For denser matrices (avgNnz >= 32): vector kernel (1 warp per row)
-                // Now warp utilization is at least 32/64 = 50%
+                // Denser matrices (avgNnz >= 32): vector kernel (1 warp per row)
+                // Warp utilization is at least 32/64 = 50%
                 int gridSize = getGridSize(matrix.numRows, warpsPerBlock);
                 spmv_csr_vector_kernel<float, 64, false><<<gridSize, blockSize, 0, stream>>>(
                     matrix.numRows, matrix.numCols, matrix.nnz,
@@ -250,62 +201,18 @@ spmv_status_t spmv_csr<double>(
                 matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
                 x, y);
         } else {
-            SpMVStrategy strategy = selectStrategy(avgNnzPerRow, matrix.numRows, matrix.nnz);
-
-            switch (strategy) {
-                case SpMVStrategy::LIGHT_BALANCED: {
-                    // Calculate optimal rows per thread
-                    // Goal: Each thread processes ~32-64 elements to maximize efficiency
-                    int rowsPerThread = max(1, min(32, 64 / max(1, avgNnzPerRow)));
-
-                    // Select kernel template and calculate gridSize based on ACTUAL template parameter
-                    int actualRowsPerThread;
-
-                    if (rowsPerThread <= 4) {
-                        actualRowsPerThread = 4;
-                    } else if (rowsPerThread <= 8) {
-                        actualRowsPerThread = 8;
-                    } else if (rowsPerThread <= 16) {
-                        actualRowsPerThread = 16;
-                    } else {
-                        actualRowsPerThread = 32;
-                    }
-
-                    int totalThreads = (matrix.numRows + actualRowsPerThread - 1) / actualRowsPerThread;
-                    int gridSize = max(1, (totalThreads + blockSize - 1) / blockSize);
-
-                    if (actualRowsPerThread == 4) {
-                        spmv_csr_light_balanced_kernel<double, 256, 4><<<gridSize, blockSize, 0, stream>>>(
-                            matrix.numRows, matrix.numCols, matrix.nnz,
-                            matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
-                            x, y);
-                    } else if (actualRowsPerThread == 8) {
-                        spmv_csr_light_balanced_kernel<double, 256, 8><<<gridSize, blockSize, 0, stream>>>(
-                            matrix.numRows, matrix.numCols, matrix.nnz,
-                            matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
-                            x, y);
-                    } else if (actualRowsPerThread == 16) {
-                        spmv_csr_light_balanced_kernel<double, 256, 16><<<gridSize, blockSize, 0, stream>>>(
-                            matrix.numRows, matrix.numCols, matrix.nnz,
-                            matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
-                            x, y);
-                    } else {
-                        spmv_csr_light_balanced_kernel<double, 256, 32><<<gridSize, blockSize, 0, stream>>>(
-                            matrix.numRows, matrix.numCols, matrix.nnz,
-                            matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
-                            x, y);
-                    }
-                    break;
-                }
-                case SpMVStrategy::VECTOR:
-                default: {
-                    int gridSize = getGridSize(matrix.numRows, warpsPerBlock);
-                    spmv_csr_vector_kernel<double, 64, false><<<gridSize, blockSize, 0, stream>>>(
-                        matrix.numRows, matrix.numCols, matrix.nnz,
-                        matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
-                        x, y);
-                    break;
-                }
+            // Mars X201 optimization: Adaptive kernel selection based on sparsity
+            // Same strategy as float - use merge-based for sparse matrices
+            if (avgNnzPerRow < 32) {
+                // Sparse matrices: Use merge-based kernel
+                spmv_merge_based<double>(matrix, x, y, stream);
+            } else {
+                // Denser matrices (avgNnz >= 32): vector kernel
+                int gridSize = getGridSize(matrix.numRows, warpsPerBlock);
+                spmv_csr_vector_kernel<double, 64, false><<<gridSize, blockSize, 0, stream>>>(
+                    matrix.numRows, matrix.numCols, matrix.nnz,
+                    matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
+                    x, y);
             }
         }
     } else {
