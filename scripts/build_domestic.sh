@@ -41,18 +41,25 @@ build_test_runner() {
     echo "Building test_runner..."
     # Use relocatable device code compilation for proper template instantiation
     # Step 1: Compile each source to device-code-only object
-    $NVCC $OPT_FLAGS $WARP_SIZE_FLAG $INCLUDE_FLAG -dc \
-        $CORE_SRCS \
-        $GEN_SRCS \
-        $BENCH_SRCS \
-        -o spmv_objs.o
 
-    # Step 2: Compile test_runner and link with device objects
+    # Compile core sources
+    OBJ_FILES=""
+    for src in $CORE_SRCS $GEN_SRCS $BENCH_SRCS; do
+        obj=$(basename $src .cu).o
+        echo "Compiling $src..."
+        $NVCC $OPT_FLAGS $WARP_SIZE_FLAG $INCLUDE_FLAG -dc $src -o $obj
+        OBJ_FILES="$OBJ_FILES $obj"
+    done
+
+    # Step 2: Compile test_runner and device-link all objects
     $NVCC $OPT_FLAGS $WARP_SIZE_FLAG $INCLUDE_FLAG \
-        spmv_objs.o \
         tests/benchmark/test_runner.cu \
+        $OBJ_FILES \
         -o test_runner \
         -dl -lcudart
+
+    # Cleanup object files
+    rm -f $OBJ_FILES
 }
 
 build_all() {
