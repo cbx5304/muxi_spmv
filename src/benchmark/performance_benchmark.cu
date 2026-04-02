@@ -75,6 +75,11 @@ spmv_status_t measureCSRPerformance(
     result.deviceId = handle->deviceId;
     result.warpSize = handle->warpSize;
     result.iterations = config.measureIterations;
+    result.useCSR5 = false;  // Standard CSR, not CSR5
+    result.conversionTimeMs = 0;
+    result.totalTimeMs = 0;
+    result.numTiles = 0;
+    result.tileSize = 0;
 
     // Get peak bandwidth from device info
     int memoryClock, busWidth;
