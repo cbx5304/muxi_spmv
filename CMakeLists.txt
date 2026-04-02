@@ -56,6 +56,12 @@ include_directories(${CMAKE_SOURCE_DIR}/src)
 # Source files - SpMV core library
 set(SPMV_CORE_SRCS
     src/spmv/csr/spmv_csr.cu
+    src/spmv/csr5/spmv_csr5.cu
+)
+
+set(SPMV_GENERATOR_SRCS
+    src/generators/matrix_generator.cu
+    src/generators/mtx_io.cu
 )
 
 set(SPMV_UTILS_SRCS
@@ -66,11 +72,17 @@ set(SPMV_API_SRCS
     src/api/spmv_api.cu
 )
 
+set(SPMV_BENCHMARK_SRCS
+    src/benchmark/performance_benchmark.cu
+)
+
 # Create SpMV library
 add_library(muxi_spmv STATIC
     ${SPMV_CORE_SRCS}
+    ${SPMV_GENERATOR_SRCS}
     ${SPMV_UTILS_SRCS}
     ${SPMV_API_SRCS}
+    ${SPMV_BENCHMARK_SRCS}
 )
 
 # Link CUDA runtime
@@ -87,6 +99,10 @@ if(BUILD_TESTS)
     # SpMV basic test
     add_executable(test_spmv tests/correctness/test_spmv.cu)
     target_link_libraries(test_spmv muxi_spmv)
+
+    # Benchmark test runner
+    add_executable(test_runner tests/benchmark/test_runner.cu)
+    target_link_libraries(test_runner muxi_spmv)
 endif()
 
 # Install targets
