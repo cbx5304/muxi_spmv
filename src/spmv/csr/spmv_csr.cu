@@ -115,42 +115,84 @@ spmv_status_t spmv_csr<float>(
                 // rowsPerThread = warpSize / avgNnzPerRow gives good balance
                 int rowsPerThread = max(1, min(32, 64 / max(1, avgNnzPerRow)));
 
-                // Ensure we launch enough threads to utilize all SMs
-                int numSMs = 104;  // Mars X201 has 104 SMs
-                int minThreads = numSMs * 8;  // At least 8 warps per SM for occupancy
+                // For large matrices, use batched kernel to keep rowPtr in L2 cache
+                // Mars X201 L2 cache appears to be ~2-4MB, can handle ~300K rows
+                const int L2_CACHE_ROWS = 200000;  // Conservative estimate
 
-                // Calculate grid size based on rows
-                int totalThreads = (matrix.numRows + rowsPerThread - 1) / rowsPerThread;
-                totalThreads = max(totalThreads, minThreads);
+                if (matrix.numRows > L2_CACHE_ROWS) {
+                    // Use batched kernel for large matrices
+                    // Process in batches of 200K rows to keep rowPtr in cache
+                    const int BATCH_SIZE = 200000;
+                    int blockSize = 256;
+                    int gridSize = min(256, (L2_CACHE_ROWS + rowsPerThread * blockSize - 1) / (rowsPerThread * blockSize));
 
-                int gridSize = (totalThreads + blockSize - 1) / blockSize;
-
-                // Use the appropriate kernel based on rows per thread
-                if (rowsPerThread <= 2) {
-                    spmv_csr_light_balanced_kernel<float, 256, 2><<<gridSize, blockSize, 0, stream>>>(
-                        matrix.numRows, matrix.numCols, matrix.nnz,
-                        matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
-                        x, y);
-                } else if (rowsPerThread <= 4) {
-                    spmv_csr_light_balanced_kernel<float, 256, 4><<<gridSize, blockSize, 0, stream>>>(
-                        matrix.numRows, matrix.numCols, matrix.nnz,
-                        matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
-                        x, y);
-                } else if (rowsPerThread <= 8) {
-                    spmv_csr_light_balanced_kernel<float, 256, 8><<<gridSize, blockSize, 0, stream>>>(
-                        matrix.numRows, matrix.numCols, matrix.nnz,
-                        matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
-                        x, y);
-                } else if (rowsPerThread <= 16) {
-                    spmv_csr_light_balanced_kernel<float, 256, 16><<<gridSize, blockSize, 0, stream>>>(
-                        matrix.numRows, matrix.numCols, matrix.nnz,
-                        matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
-                        x, y);
+                    // Select template based on rowsPerThread
+                    if (rowsPerThread <= 4) {
+                        spmv_csr_batched_kernel<float, 256, 4, BATCH_SIZE><<<gridSize, blockSize, 0, stream>>>(
+                            matrix.numRows, matrix.numCols, matrix.nnz,
+                            matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
+                            x, y);
+                    } else if (rowsPerThread <= 8) {
+                        spmv_csr_batched_kernel<float, 256, 8, BATCH_SIZE><<<gridSize, blockSize, 0, stream>>>(
+                            matrix.numRows, matrix.numCols, matrix.nnz,
+                            matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
+                            x, y);
+                    } else if (rowsPerThread <= 16) {
+                        spmv_csr_batched_kernel<float, 256, 16, BATCH_SIZE><<<gridSize, blockSize, 0, stream>>>(
+                            matrix.numRows, matrix.numCols, matrix.nnz,
+                            matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
+                            x, y);
+                    } else {
+                        spmv_csr_batched_kernel<float, 256, 32, BATCH_SIZE><<<gridSize, blockSize, 0, stream>>>(
+                            matrix.numRows, matrix.numCols, matrix.nnz,
+                            matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
+                            x, y);
+                    }
                 } else {
-                    spmv_csr_light_balanced_kernel<float, 256, 32><<<gridSize, blockSize, 0, stream>>>(
-                        matrix.numRows, matrix.numCols, matrix.nnz,
-                        matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
-                        x, y);
+                    // Use standard light-balanced kernel for smaller matrices
+                    int actualRowsPerThread;
+
+                    if (rowsPerThread <= 2) {
+                        actualRowsPerThread = 2;
+                        int totalThreads = (matrix.numRows + actualRowsPerThread - 1) / actualRowsPerThread;
+                        int gridSize = max(1, (totalThreads + blockSize - 1) / blockSize);
+                        spmv_csr_light_balanced_kernel<float, 256, 2><<<gridSize, blockSize, 0, stream>>>(
+                            matrix.numRows, matrix.numCols, matrix.nnz,
+                            matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
+                            x, y);
+                    } else if (rowsPerThread <= 4) {
+                        actualRowsPerThread = 4;
+                        int totalThreads = (matrix.numRows + actualRowsPerThread - 1) / actualRowsPerThread;
+                        int gridSize = max(1, (totalThreads + blockSize - 1) / blockSize);
+                        spmv_csr_light_balanced_kernel<float, 256, 4><<<gridSize, blockSize, 0, stream>>>(
+                            matrix.numRows, matrix.numCols, matrix.nnz,
+                            matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
+                            x, y);
+                    } else if (rowsPerThread <= 8) {
+                        actualRowsPerThread = 8;
+                        int totalThreads = (matrix.numRows + actualRowsPerThread - 1) / actualRowsPerThread;
+                        int gridSize = max(1, (totalThreads + blockSize - 1) / blockSize);
+                        spmv_csr_light_balanced_kernel<float, 256, 8><<<gridSize, blockSize, 0, stream>>>(
+                            matrix.numRows, matrix.numCols, matrix.nnz,
+                            matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
+                            x, y);
+                    } else if (rowsPerThread <= 16) {
+                        actualRowsPerThread = 16;
+                        int totalThreads = (matrix.numRows + actualRowsPerThread - 1) / actualRowsPerThread;
+                        int gridSize = max(1, (totalThreads + blockSize - 1) / blockSize);
+                        spmv_csr_light_balanced_kernel<float, 256, 16><<<gridSize, blockSize, 0, stream>>>(
+                            matrix.numRows, matrix.numCols, matrix.nnz,
+                            matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
+                            x, y);
+                    } else {
+                        actualRowsPerThread = 32;
+                        int totalThreads = (matrix.numRows + actualRowsPerThread - 1) / actualRowsPerThread;
+                        int gridSize = max(1, (totalThreads + blockSize - 1) / blockSize);
+                        spmv_csr_light_balanced_kernel<float, 256, 32><<<gridSize, blockSize, 0, stream>>>(
+                            matrix.numRows, matrix.numCols, matrix.nnz,
+                            matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
+                            x, y);
+                    }
                 }
             } else {
                 // For denser matrices (avgNnz >= 32): vector kernel (1 warp per row)
@@ -243,26 +285,34 @@ spmv_status_t spmv_csr<double>(
                     // Calculate optimal rows per thread
                     // Goal: Each thread processes ~32-64 elements to maximize efficiency
                     int rowsPerThread = max(1, min(32, 64 / max(1, avgNnzPerRow)));
-                    int totalThreads = (matrix.numRows + rowsPerThread - 1) / rowsPerThread;
 
-                    // Ensure minimum thread count for SM utilization
-                    int numSMs = 104;
-                    int minThreads = numSMs * 8;
-                    totalThreads = max(totalThreads, minThreads);
-
-                    int gridSize = getGridSize(totalThreads, blockSize);
+                    // Select kernel template and calculate gridSize based on ACTUAL template parameter
+                    int actualRowsPerThread;
 
                     if (rowsPerThread <= 4) {
+                        actualRowsPerThread = 4;
+                    } else if (rowsPerThread <= 8) {
+                        actualRowsPerThread = 8;
+                    } else if (rowsPerThread <= 16) {
+                        actualRowsPerThread = 16;
+                    } else {
+                        actualRowsPerThread = 32;
+                    }
+
+                    int totalThreads = (matrix.numRows + actualRowsPerThread - 1) / actualRowsPerThread;
+                    int gridSize = max(1, (totalThreads + blockSize - 1) / blockSize);
+
+                    if (actualRowsPerThread == 4) {
                         spmv_csr_light_balanced_kernel<double, 256, 4><<<gridSize, blockSize, 0, stream>>>(
                             matrix.numRows, matrix.numCols, matrix.nnz,
                             matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
                             x, y);
-                    } else if (rowsPerThread <= 8) {
+                    } else if (actualRowsPerThread == 8) {
                         spmv_csr_light_balanced_kernel<double, 256, 8><<<gridSize, blockSize, 0, stream>>>(
                             matrix.numRows, matrix.numCols, matrix.nnz,
                             matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
                             x, y);
-                    } else if (rowsPerThread <= 16) {
+                    } else if (actualRowsPerThread == 16) {
                         spmv_csr_light_balanced_kernel<double, 256, 16><<<gridSize, blockSize, 0, stream>>>(
                             matrix.numRows, matrix.numCols, matrix.nnz,
                             matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,

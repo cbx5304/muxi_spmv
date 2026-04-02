@@ -537,6 +537,118 @@ __global__ void spmv_csr5_kernel(
 }
 
 /**
+ * @brief Batched kernel for sparse matrices on warp=64
+ * Processes rows in batches to keep rowPtr data in L2 cache
+ * Each batch processes BATCH_SIZE rows before moving to next batch
+ * This kernel is optimized for matrices where rowPtr exceeds L2 cache
+ */
+template<typename FloatType, int BLOCK_SIZE, int ROWS_PER_THREAD, int BATCH_SIZE>
+__global__ void spmv_csr_batched_kernel(
+    int numRows,
+    int numCols,
+    int nnz,
+    const int* __restrict__ rowPtr,
+    const int* __restrict__ colIdx,
+    const FloatType* __restrict__ values,
+    const FloatType* __restrict__ x,
+    FloatType* __restrict__ y)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int totalThreads = gridDim.x * blockDim.x;
+
+    // Calculate how many batches we need
+    int numBatches = (numRows + BATCH_SIZE - 1) / BATCH_SIZE;
+
+    // Process batches sequentially
+    for (int batch = 0; batch < numBatches; batch++) {
+        int batchStartRow = batch * BATCH_SIZE;
+        int batchEndRow = min(batchStartRow + BATCH_SIZE, numRows);
+
+        // Each thread processes ROWS_PER_THREAD rows within this batch
+        int rowsInBatch = batchEndRow - batchStartRow;
+        int threadsForBatch = (rowsInBatch + ROWS_PER_THREAD - 1) / ROWS_PER_THREAD;
+
+        // Process rows assigned to this thread in this batch
+        int localTid = tid;
+        while (localTid < threadsForBatch) {
+            int row = batchStartRow + localTid * ROWS_PER_THREAD;
+
+            for (int r = 0; r < ROWS_PER_THREAD; r++) {
+                int currentRow = row + r;
+                if (currentRow >= batchEndRow) break;
+
+                int rowStart = rowPtr[currentRow];
+                int rowEnd = rowPtr[currentRow + 1];
+
+                FloatType sum = static_cast<FloatType>(0);
+                for (int i = rowStart; i < rowEnd; i++) {
+                    sum += values[i] * x[colIdx[i]];
+                }
+                y[currentRow] = sum;
+            }
+
+            localTid += totalThreads;
+        }
+    }
+}
+
+/**
+ * @brief Warp-cooperative kernel for sparse matrices on warp=64
+ * Each warp processes multiple rows cooperatively to reduce memory overhead
+ * Threads in a warp share rowPtr reads to improve cache efficiency
+ */
+template<typename FloatType, int BLOCK_SIZE, int WARP_SZ, int ROWS_PER_WARP>
+__global__ void spmv_csr_warp_cooperative_kernel(
+    int numRows,
+    int numCols,
+    int nnz,
+    const int* __restrict__ rowPtr,
+    const int* __restrict__ colIdx,
+    const FloatType* __restrict__ values,
+    const FloatType* __restrict__ x,
+    FloatType* __restrict__ y)
+{
+    int warpId = blockIdx.x * (BLOCK_SIZE / WARP_SZ) + (threadIdx.x / WARP_SZ);
+    int lane = threadIdx.x % WARP_SZ;
+    int totalWarps = gridDim.x * (BLOCK_SIZE / WARP_SZ);
+
+    // Each warp processes ROWS_PER_WARP rows
+    int startRow = warpId * ROWS_PER_WARP;
+
+    for (int r = 0; r < ROWS_PER_WARP; r++) {
+        int row = startRow + r;
+        if (row >= numRows) return;
+
+        // Warp leader reads rowPtr and broadcasts to all lanes
+        int rowStart, rowEnd, rowNnz;
+        if (lane == 0) {
+            rowStart = rowPtr[row];
+            rowEnd = rowPtr[row + 1];
+            rowNnz = rowEnd - rowStart;
+        }
+        // Broadcast row info to all threads in warp
+        rowStart = __shfl_sync(0xffffffff, rowStart, 0);
+        rowEnd = __shfl_sync(0xffffffff, rowEnd, 0);
+        rowNnz = __shfl_sync(0xffffffff, rowNnz, 0);
+
+        // Distribute NNZ elements across warp threads
+        // Each thread processes a chunk of the row's elements
+        FloatType sum = static_cast<FloatType>(0);
+        for (int i = rowStart + lane; i < rowEnd; i += WARP_SZ) {
+            sum += values[i] * x[colIdx[i]];
+        }
+
+        // Warp-level reduction to get final sum
+        sum = warpReduceSum<FloatType, WARP_SZ>(sum);
+
+        // Lane 0 writes the result
+        if (lane == 0) {
+            y[row] = sum;
+        }
+    }
+}
+
+/**
  * @brief Light-weight NNZ-balanced kernel for very sparse matrices
  * Each thread processes a fixed number of rows (optimal for avgNnzPerRow < 8)
  * This is the "scalar" approach but with multiple rows per thread
