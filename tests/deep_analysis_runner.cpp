@@ -5,17 +5,15 @@
  * Tests multiple optimization strategies and provides detailed analysis:
  * - Partition strategy optimization
  * - Memory access pattern analysis
- * - Assembly-level optimization effects
  * - Comparison with theoretical limits
  */
 
 #include <iostream>
 #include <fstream>
-#include <sstream>
 #include <vector>
 #include <cmath>
 #include <iomanip>
-#include <chrono>
+#include <cstdlib>
 
 #include "formats/sparse_formats.h"
 #include "spmv/csr/spmv_csr.cuh"
@@ -23,7 +21,7 @@
 #include "spmv/csr5/assembly_analysis.cuh"
 #include "spmv/csr5/ultra_optimized_test.cu"
 #include "utils/timer.h"
-#include "utils/matrix_generator.h"
+#include "generators/matrix_generator.h"
 
 using namespace muxi_spmv;
 
@@ -34,7 +32,6 @@ struct TestConfig {
     int numCols;
     int avgNnzPerRow;
     int numIterations;
-    std::string matrixType;  // "random", "diagonal", "band"
 };
 
 // ==================== Performance Analysis Functions ====================
@@ -50,11 +47,6 @@ struct PerformanceResult {
     float bandwidthGBs;
     float utilizationPercent;
     bool correct;
-
-    // Memory analysis
-    size_t totalDataBytes;
-    float randomAccessFactor;
-    float cacheMissRate;
 };
 
 template<typename FloatType>
@@ -72,6 +64,11 @@ PerformanceResult<FloatType> runKernelTest(
 
     GpuTimer timer;
     std::vector<float> times;
+
+    // Warmup
+    cudaMemset(d_y, 0, matrix.numRows * sizeof(FloatType));
+    kernelFunc(matrix, d_x, d_y, 0);
+    cudaDeviceSynchronize();
 
     // Run kernel multiple times
     for (int i = 0; i < numIterations; i++) {
@@ -113,22 +110,15 @@ PerformanceResult<FloatType> runKernelTest(
     delete[] h_ref;
 
     // Calculate bandwidth metrics
-    result.totalDataBytes = matrix.numRows * sizeof(int) * 2 +
+    size_t totalDataBytes = matrix.numRows * sizeof(int) * 2 +
                            matrix.nnz * sizeof(int) +
                            matrix.nnz * sizeof(FloatType) +
                            matrix.nnz * sizeof(FloatType) +
                            matrix.numRows * sizeof(FloatType);
 
     float peakBW = (WARP_SIZE == 64) ? 1843.0f : 1008.0f;
-    result.bandwidthGBs = (result.totalDataBytes / (avgTime * 1e-3)) / (1024 * 1024 * 1024);
+    result.bandwidthGBs = (totalDataBytes / (avgTime * 1e-3)) / (1024 * 1024 * 1024);
     result.utilizationPercent = result.bandwidthGBs / peakBW * 100;
-
-    // Memory analysis
-    auto analysis = analyze_memory_access<FloatType>(
-        matrix.numRows, matrix.nnz,
-        matrix.nnz / matrix.numRows, matrix.numCols);
-    result.randomAccessFactor = analysis.randomAccessFactor;
-    result.cacheMissRate = analysis.cacheMissRate;
 
     return result;
 }
@@ -140,8 +130,6 @@ void printResult(const PerformanceResult<FloatType>& result) {
     std::cout << "  Bandwidth: " << result.bandwidthGBs << " GB/s\n";
     std::cout << "  Utilization: " << result.utilizationPercent << " %\n";
     std::cout << "  Correctness: " << (result.correct ? "PASS" : "FAIL") << "\n";
-    std::cout << "  Random Access Factor: " << result.randomAccessFactor << "\n";
-    std::cout << "  Cache Miss Rate: " << result.cacheMissRate * 100 << " %\n";
 }
 
 // ==================== Comprehensive Analysis ====================
@@ -157,21 +145,26 @@ void runComprehensiveAnalysis(const TestConfig& config) {
     std::cout << "  Rows: " << config.numRows << "\n";
     std::cout << "  Columns: " << config.numCols << "\n";
     std::cout << "  Avg NNZ/Row: " << config.avgNnzPerRow << "\n";
-    std::cout << "  Matrix Type: " << config.matrixType << "\n";
     std::cout << "  Iterations: " << config.numIterations << "\n";
 
-    // Generate matrix
+    // Generate matrix using existing generator
     std::cout << "\nGenerating matrix...\n";
     CSRMatrix<FloatType> matrix;
-    generateRandomCSRMatrix(matrix, config.numRows, config.numCols,
-                            config.avgNnzPerRow, config.matrixType);
+    int nnz = config.numRows * config.avgNnzPerRow;
+
+    spmv_status_t status = generators::generateRandomMatrix<FloatType>(
+        config.numRows, config.numCols, nnz, matrix);
+
+    if (status != SPMV_SUCCESS) {
+        std::cerr << "Failed to generate matrix!\n";
+        return;
+    }
 
     std::cout << "  Actual NNZ: " << matrix.nnz << "\n";
     std::cout << "  Actual Avg NNZ/Row: " << (matrix.nnz / matrix.numRows) << "\n";
 
     // Generate input/output vectors
     FloatType* h_x = new FloatType[config.numCols];
-    FloatType* h_y = new FloatType[config.numRows];
     FloatType* h_reference = new FloatType[config.numRows];
 
     for (int i = 0; i < config.numCols; i++) {
@@ -180,8 +173,8 @@ void runComprehensiveAnalysis(const TestConfig& config) {
 
     // Compute reference on CPU
     std::cout << "\nComputing CPU reference...\n";
-    FloatType* h_rowPtr = new FloatType[matrix.numRows + 1];
-    FloatType* h_colIdx = new FloatType[matrix.nnz];
+    int* h_rowPtr = new int[matrix.numRows + 1];
+    int* h_colIdx = new int[matrix.nnz];
     FloatType* h_values = new FloatType[matrix.nnz];
 
     cudaMemcpy(h_rowPtr, matrix.d_rowPtr, (matrix.numRows + 1) * sizeof(int), cudaMemcpyDeviceToHost);
@@ -229,19 +222,7 @@ void runComprehensiveAnalysis(const TestConfig& config) {
     results.push_back(runKernelTest("Ultra-Optimized (prefetch+warp_agg)",
         ultraOptimized, matrix, d_x, d_y, d_reference, config.numIterations));
 
-    // Test 3: CSR5 (if applicable)
-    if (config.avgNnzPerRow < 32) {
-        CSR5Matrix<FloatType> csr5;
-        csr5_preprocess<FloatType>(matrix, csr5, 256, 0);
-
-        auto csr5Kernel = [&csr5](const CSRMatrix<FloatType>& m, const FloatType* x, FloatType* y, cudaStream_t s) {
-            spmv_csr5<FloatType>(csr5, x, y, 1.0, 0.0, spmv_opts_t());
-        };
-        results.push_back(runKernelTest("CSR5 (atomic-based)",
-            csr5Kernel, matrix, d_x, d_y, d_reference, config.numIterations));
-    }
-
-    // Test 4: Scalar kernel (baseline)
+    // Test 3: Scalar kernel (baseline)
     auto scalarKernel = [](const CSRMatrix<FloatType>& m, const FloatType* x, FloatType* y, cudaStream_t s) {
         spmv_csr_scalar<FloatType>(m, x, y, 1.0, 0.0, spmv_opts_t());
     };
@@ -304,26 +285,19 @@ void runComprehensiveAnalysis(const TestConfig& config) {
     std::cout << "  Peak Bandwidth: " << peakBW << " GB/s\n";
     std::cout << "  L2 Cache: ~" << l2Cache << " MB\n";
 
-    // Calculate theoretical minimum time
-    float theoreticalTime = analysis.totalBytes / (peakBW * 1024 * 1024 * 1024);
-    float randomAccessTime = theoreticalTime * analysis.randomAccessFactor;
-    float cacheMissTime = randomAccessTime * (1 + analysis.cacheMissRate * 0.5);
-
-    std::cout << "\nTime Analysis:\n";
-    std::cout << "  Theoretical min: " << theoreticalTime * 1000 << " ms\n";
-    std::cout << "  Random access penalty: " << (analysis.randomAccessFactor - 1) * 100 << " %\n";
-    std::cout << "  Cache miss penalty: " << analysis.cacheMissRate * 50 << " %\n";
-    std::cout << "  Expected time: " << cacheMissTime * 1000 << " ms\n";
-
     float bestUtil = 0;
+    std::string bestKernel;
     for (const auto& result : results) {
         if (result.correct && result.utilizationPercent > bestUtil) {
             bestUtil = result.utilizationPercent;
+            bestKernel = result.kernelName;
         }
     }
 
-    std::cout << "\nAchieved utilization: " << bestUtil << " %\n";
-    std::cout << "Gap from theoretical: " << (100 - bestUtil) << " %\n";
+    std::cout << "\nBest Achieved:\n";
+    std::cout << "  Kernel: " << bestKernel << "\n";
+    std::cout << "  Utilization: " << bestUtil << " %\n";
+    std::cout << "  Gap from theoretical: " << (100 - bestUtil) << " %\n";
 
     // ==================== Write Report ====================
 
@@ -361,7 +335,6 @@ void runComprehensiveAnalysis(const TestConfig& config) {
 
     // Cleanup
     delete[] h_x;
-    delete[] h_y;
     delete[] h_reference;
     delete[] h_rowPtr;
     delete[] h_colIdx;
@@ -378,9 +351,9 @@ int main(int argc, char** argv) {
     std::cout << "WARP_SIZE = " << WARP_SIZE << "\n";
 
     if (argc < 5) {
-        std::cout << "\nUsage: " << argv[0] << " <rows> <cols> <avgNnz> <iterations> [matrix_type]\n";
+        std::cout << "\nUsage: " << argv[0] << " <rows> <cols> <avgNnz> <iterations>\n";
         std::cout << "\nExample:\n";
-        std::cout << "  " << argv[0] << " 1000000 1000 10 100 random\n";
+        std::cout << "  " << argv[0] << " 1000000 1000 10 100\n";
         return 1;
     }
 
@@ -389,7 +362,6 @@ int main(int argc, char** argv) {
     config.numCols = std::atoi(argv[2]);
     config.avgNnzPerRow = std::atoi(argv[3]);
     config.numIterations = std::atoi(argv[4]);
-    config.matrixType = (argc > 5) ? argv[5] : "random";
 
     // Run analysis
     runComprehensiveAnalysis<float>(config);

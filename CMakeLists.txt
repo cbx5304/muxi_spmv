@@ -57,6 +57,7 @@ include_directories(${CMAKE_SOURCE_DIR}/src)
 set(SPMV_CORE_SRCS
     src/spmv/csr/spmv_csr.cu
     src/spmv/csr5/spmv_csr5.cu
+    src/spmv/csr5/ultra_optimized_test.cu
 )
 
 set(SPMV_GENERATOR_SRCS
@@ -103,6 +104,10 @@ if(BUILD_TESTS)
     # Benchmark test runner
     add_executable(test_runner tests/benchmark/test_runner.cu)
     target_link_libraries(test_runner muxi_spmv)
+
+    # Deep analysis runner (simplified)
+    add_executable(deep_analysis tests/deep_analysis.cu)
+    target_link_libraries(deep_analysis muxi_spmv)
 endif()
 
 # Install targets
