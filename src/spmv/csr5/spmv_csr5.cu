@@ -533,6 +533,234 @@ __device__ __forceinline__ void merge_path_search(
 }
 
 /**
+ * Optimized Merge-based SpMV kernel - v2
+ *
+ * Key optimizations:
+ * 1. Pre-compute row boundaries at partition start (reduce binary searches)
+ * 2. Use sequential row processing within partitions
+ * 3. Minimize atomic operations
+ */
+template<typename FloatType, int BLOCK_SIZE, int WarpSize>
+__global__ void spmv_merge_based_optimized_kernel(
+    int numRows,
+    int numCols,
+    int nnz,
+    const int* __restrict__ rowPtr,
+    const int* __restrict__ colIdx,
+    const FloatType* __restrict__ values,
+    const FloatType* __restrict__ x,
+    FloatType* __restrict__ y,
+    const int* __restrict__ mergePathPos,
+    int numPartitions)
+{
+    int warpId = blockIdx.x * (BLOCK_SIZE / WarpSize) + (threadIdx.x / WarpSize);
+    int lane = threadIdx.x % WarpSize;
+
+    if (warpId >= numPartitions) return;
+
+    // Get partition boundaries
+    int pathStart = mergePathPos[warpId];
+    int pathEnd = mergePathPos[warpId + 1];
+
+    // Convert merge path positions to row range
+    int startRow, startNnz, endRow, endNnz;
+
+    if (lane == 0) {
+        merge_path_search(rowPtr, numRows, nnz, pathStart, startRow, startNnz);
+        merge_path_search(rowPtr, numRows, nnz, pathEnd, endRow, endNnz);
+    }
+
+    startRow = __shfl_sync(0xffffffff, startRow, 0);
+    startNnz = __shfl_sync(0xffffffff, startNnz, 0);
+    endRow = __shfl_sync(0xffffffff, endRow, 0);
+    endNnz = __shfl_sync(0xffffffff, endNnz, 0);
+
+    // Calculate row range for this partition
+    int numRowsInPartition = endRow - startRow;
+    if (numRowsInPartition <= 0) return;
+
+    // Strategy: Each thread processes multiple rows independently
+    // This avoids warp synchronization overhead for small rows
+
+    // Calculate rows per thread - distribute evenly
+    int rowsPerThread = (numRowsInPartition + WarpSize - 1) / WarpSize;
+    int myRowStart = startRow + lane * rowsPerThread;
+    int myRowEnd = min(myRowStart + rowsPerThread, endRow);
+
+    // Handle partial first row if partition starts mid-row
+    bool hasPartialFirst = (lane == 0 && startNnz > rowPtr[startRow]);
+    if (hasPartialFirst) {
+        FloatType partialSum = static_cast<FloatType>(0);
+        int firstRowEnd = min(rowPtr[startRow + 1], endNnz);
+        for (int idx = startNnz; idx < firstRowEnd; idx++) {
+            partialSum += values[idx] * x[colIdx[idx]];
+        }
+        atomicAdd(&y[startRow], partialSum);
+        myRowStart = startRow + 1;
+    }
+
+    // Handle partial last row if partition ends mid-row
+    bool hasPartialLast = (lane == WarpSize - 1 && endRow < numRows && endNnz < rowPtr[endRow + 1] && endNnz > rowPtr[endRow]);
+    if (hasPartialLast) {
+        FloatType partialSum = static_cast<FloatType>(0);
+        for (int idx = endNnz; idx < rowPtr[endRow + 1]; idx++) {
+            partialSum += values[idx] * x[colIdx[idx]];
+        }
+        atomicAdd(&y[endRow], partialSum);
+        myRowEnd = endRow;
+    }
+
+    // Process complete rows - direct write (no atomics!)
+    for (int row = myRowStart; row < myRowEnd && row < numRows; row++) {
+        FloatType sum = static_cast<FloatType>(0);
+        int rowStartNnz = rowPtr[row];
+        int rowEndNnz = rowPtr[row + 1];
+
+        // Process entire row
+        for (int idx = rowStartNnz; idx < rowEndNnz; idx++) {
+            sum += values[idx] * x[colIdx[idx]];
+        }
+
+        y[row] = sum;  // Direct write - exclusive ownership!
+    }
+}
+
+/**
+ * Warp-cooperative Merge-based SpMV kernel - v3
+ *
+ * For very sparse matrices (avgNnz << WarpSize), use warp-cooperative processing:
+ * - All threads in warp process the same row together
+ * - Better for rows with > WarpSize elements
+ * - Falls back to sequential for small rows
+ */
+template<typename FloatType, int BLOCK_SIZE, int WarpSize>
+__global__ void spmv_merge_based_warp_coop_kernel(
+    int numRows,
+    int numCols,
+    int nnz,
+    const int* __restrict__ rowPtr,
+    const int* __restrict__ colIdx,
+    const FloatType* __restrict__ values,
+    const FloatType* __restrict__ x,
+    FloatType* __restrict__ y,
+    const int* __restrict__ mergePathPos,
+    int numPartitions,
+    int avgNnzPerRow)  // Pass average nnz for adaptive strategy
+{
+    int warpId = blockIdx.x * (BLOCK_SIZE / WarpSize) + (threadIdx.x / WarpSize);
+    int lane = threadIdx.x % WarpSize;
+
+    if (warpId >= numPartitions) return;
+
+    int pathStart = mergePathPos[warpId];
+    int pathEnd = mergePathPos[warpId + 1];
+
+    int startRow, startNnz, endRow, endNnz;
+    if (lane == 0) {
+        merge_path_search(rowPtr, numRows, nnz, pathStart, startRow, startNnz);
+        merge_path_search(rowPtr, numRows, nnz, pathEnd, endRow, endNnz);
+    }
+
+    startRow = __shfl_sync(0xffffffff, startRow, 0);
+    startNnz = __shfl_sync(0xffffffff, startNnz, 0);
+    endRow = __shfl_sync(0xffffffff, endRow, 0);
+    endNnz = __shfl_sync(0xffffffff, endNnz, 0);
+
+    int numRowsInPartition = endRow - startRow;
+    if (numRowsInPartition <= 0) return;
+
+    // Adaptive strategy based on avgNnzPerRow
+    if (avgNnzPerRow >= WarpSize / 2) {
+        // Use warp-cooperative: each warp processes rows together
+        // All threads contribute to the same row
+        int currentRow = startRow;
+
+        // Handle partial first row
+        if (startNnz > rowPtr[startRow]) {
+            FloatType partialSum = static_cast<FloatType>(0);
+            int firstRowEnd = min(rowPtr[startRow + 1], endNnz);
+            for (int idx = startNnz + lane; idx < firstRowEnd; idx += WarpSize) {
+                partialSum += values[idx] * x[colIdx[idx]];
+            }
+            partialSum = csr5_warp_reduce_sum<FloatType, WarpSize>(partialSum);
+            if (lane == 0 && partialSum != static_cast<FloatType>(0)) {
+                atomicAdd(&y[startRow], partialSum);
+            }
+            currentRow = startRow + 1;
+        }
+
+        // Process rows cooperatively
+        while (currentRow < endRow && currentRow < numRows) {
+            int rowStartNnz = rowPtr[currentRow];
+            int rowEndNnz = rowPtr[currentRow + 1];
+            int rowNnz = rowEndNnz - rowStartNnz;
+
+            FloatType sum = static_cast<FloatType>(0);
+
+            // Distribute elements across warp
+            for (int idx = rowStartNnz + lane; idx < rowEndNnz; idx += WarpSize) {
+                sum += values[idx] * x[colIdx[idx]];
+            }
+
+            sum = csr5_warp_reduce_sum<FloatType, WarpSize>(sum);
+
+            if (lane == 0) {
+                y[currentRow] = sum;
+            }
+
+            currentRow++;
+        }
+
+        // Handle partial last row
+        if (endRow < numRows && endNnz < rowPtr[endRow + 1] && endNnz > rowPtr[endRow]) {
+            FloatType partialSum = static_cast<FloatType>(0);
+            for (int idx = endNnz + lane; idx < rowPtr[endRow + 1]; idx += WarpSize) {
+                partialSum += values[idx] * x[colIdx[idx]];
+            }
+            partialSum = csr5_warp_reduce_sum<FloatType, WarpSize>(partialSum);
+            if (lane == 0 && partialSum != static_cast<FloatType>(0)) {
+                atomicAdd(&y[endRow], partialSum);
+            }
+        }
+    } else {
+        // Very sparse: use sequential processing per thread
+        // Each thread processes multiple rows independently
+        int rowsPerThread = (numRowsInPartition + WarpSize - 1) / WarpSize;
+        int myRowStart = startRow + lane * rowsPerThread;
+        int myRowEnd = min(myRowStart + rowsPerThread, endRow);
+
+        // Handle partial first row
+        if (lane == 0 && startNnz > rowPtr[startRow]) {
+            FloatType partialSum = static_cast<FloatType>(0);
+            for (int idx = startNnz; idx < rowPtr[startRow + 1]; idx++) {
+                partialSum += values[idx] * x[colIdx[idx]];
+            }
+            atomicAdd(&y[startRow], partialSum);
+            myRowStart = startRow + 1;
+        }
+
+        // Handle partial last row
+        if (lane == WarpSize - 1 && endRow < numRows && endNnz < rowPtr[endRow + 1]) {
+            FloatType partialSum = static_cast<FloatType>(0);
+            for (int idx = endNnz; idx < rowPtr[endRow + 1]; idx++) {
+                partialSum += values[idx] * x[colIdx[idx]];
+            }
+            atomicAdd(&y[endRow], partialSum);
+            myRowEnd = endRow;
+        }
+
+        // Process complete rows
+        for (int row = myRowStart; row < myRowEnd && row < numRows; row++) {
+            FloatType sum = static_cast<FloatType>(0);
+            for (int idx = rowPtr[row]; idx < rowPtr[row + 1]; idx++) {
+                sum += values[idx] * x[colIdx[idx]];
+            }
+            y[row] = sum;
+        }
+    }
+}
+
+/**
  * Merge-based SpMV kernel - Optimized version
  *
  * Uses merge-path algorithm to divide work evenly without atomics.
@@ -697,7 +925,7 @@ __global__ void compute_merge_partitions_kernel(
 }
 
 /**
- * Host function for merge-based SpMV
+ * Host function for merge-based SpMV - with optimized variants
  */
 template<typename FloatType>
 spmv_status_t spmv_merge_based(
@@ -739,13 +967,21 @@ spmv_status_t spmv_merge_based(
     // Launch kernel
     gridSize = (numPartitions + warpsPerBlock - 1) / warpsPerBlock;
 
+    // Get avgNnz for adaptive strategy
+    int avgNnzPerRow = matrix.nnz / max(matrix.numRows, 1);
+
+    // Select kernel variant based on sparsity
+    // For very sparse matrices (avgNnz < WarpSize/4), use sequential processing
+    // For moderately sparse, use warp-cooperative
     if (WARP_SIZE == 64) {
-        spmv_merge_based_kernel<FloatType, 256, 64><<<gridSize, blockSize, 0, stream>>>(
+        // Mars X201 - use warp-cooperative for adaptive strategy
+        spmv_merge_based_warp_coop_kernel<FloatType, 256, 64><<<gridSize, blockSize, 0, stream>>>(
             matrix.numRows, matrix.numCols, matrix.nnz,
             matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
-            x, y, d_mergePathPos, numPartitions);
+            x, y, d_mergePathPos, numPartitions, avgNnzPerRow);
     } else {
-        spmv_merge_based_kernel<FloatType, 256, 32><<<gridSize, blockSize, 0, stream>>>(
+        // RTX 4090 - use optimized sequential kernel
+        spmv_merge_based_optimized_kernel<FloatType, 256, 32><<<gridSize, blockSize, 0, stream>>>(
             matrix.numRows, matrix.numCols, matrix.nnz,
             matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
             x, y, d_mergePathPos, numPartitions);
@@ -754,6 +990,64 @@ spmv_status_t spmv_merge_based(
     // Cleanup
     cudaFree(d_mergePathPos);
 
+    return SPMV_SUCCESS;
+}
+
+/**
+ * Host function for merge-based SpMV with specific kernel variant
+ */
+template<typename FloatType>
+spmv_status_t spmv_merge_based_v2(
+    const CSRMatrix<FloatType>& matrix,
+    const FloatType* x,
+    FloatType* y,
+    cudaStream_t stream,
+    bool useOptimized)
+{
+    if (matrix.nnz == 0) {
+        return SPMV_SUCCESS;
+    }
+
+    int blockSize = 256;
+    int warpsPerBlock = blockSize / WARP_SIZE;
+    int mergePathLength = matrix.numRows + matrix.nnz;
+
+    int targetPartitions = mergePathLength / 64;
+    int numSMs = (WARP_SIZE == 64) ? 104 : 128;
+    int maxPartitions = numSMs * warpsPerBlock * 4;
+    int numPartitions = max(1, min(targetPartitions, maxPartitions));
+
+    int* d_mergePathPos;
+    cudaMalloc(&d_mergePathPos, (numPartitions + 1) * sizeof(int));
+
+    int gridSize = (numPartitions + 2 + 255) / 256;
+    compute_merge_partitions_kernel<<<gridSize, 256, 0, stream>>>(
+        matrix.numRows, matrix.nnz, mergePathLength, numPartitions, d_mergePathPos);
+
+    cudaMemsetAsync(y, 0, matrix.numRows * sizeof(FloatType), stream);
+
+    gridSize = (numPartitions + warpsPerBlock - 1) / warpsPerBlock;
+
+    if (WARP_SIZE == 64) {
+        if (useOptimized) {
+            spmv_merge_based_optimized_kernel<FloatType, 256, 64><<<gridSize, blockSize, 0, stream>>>(
+                matrix.numRows, matrix.numCols, matrix.nnz,
+                matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
+                x, y, d_mergePathPos, numPartitions);
+        } else {
+            spmv_merge_based_kernel<FloatType, 256, 64><<<gridSize, blockSize, 0, stream>>>(
+                matrix.numRows, matrix.numCols, matrix.nnz,
+                matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
+                x, y, d_mergePathPos, numPartitions);
+        }
+    } else {
+        spmv_merge_based_optimized_kernel<FloatType, 256, 32><<<gridSize, blockSize, 0, stream>>>(
+            matrix.numRows, matrix.numCols, matrix.nnz,
+            matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
+            x, y, d_mergePathPos, numPartitions);
+    }
+
+    cudaFree(d_mergePathPos);
     return SPMV_SUCCESS;
 }
 
@@ -767,5 +1061,7 @@ template spmv_status_t spmv_csr5<float>(const CSR5Matrix<float>&, const float*, 
 template spmv_status_t spmv_csr5<double>(const CSR5Matrix<double>&, const double*, double*, double, double, const spmv_opts_t&);
 template spmv_status_t spmv_merge_based<float>(const CSRMatrix<float>&, const float*, float*, cudaStream_t);
 template spmv_status_t spmv_merge_based<double>(const CSRMatrix<double>&, const double*, double*, cudaStream_t);
+template spmv_status_t spmv_merge_based_v2<float>(const CSRMatrix<float>&, const float*, float*, cudaStream_t, bool);
+template spmv_status_t spmv_merge_based_v2<double>(const CSRMatrix<double>&, const double*, double*, cudaStream_t, bool);
 
 } // namespace muxi_spmv

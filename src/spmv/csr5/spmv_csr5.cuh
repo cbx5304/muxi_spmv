@@ -299,6 +299,24 @@ spmv_status_t spmv_merge_based(
     cudaStream_t stream);
 
 /**
+ * @brief Execute Merge-based SpMV with specific kernel variant
+ *
+ * @param matrix CSR matrix
+ * @param x Input vector (device pointer)
+ * @param y Output vector (device pointer)
+ * @param stream CUDA stream
+ * @param useOptimized Use optimized sequential kernel (true) or original kernel (false)
+ * @return Status code
+ */
+template<typename FloatType>
+spmv_status_t spmv_merge_based_v2(
+    const CSRMatrix<FloatType>& matrix,
+    const FloatType* x,
+    FloatType* y,
+    cudaStream_t stream,
+    bool useOptimized);
+
+/**
  * @brief CSR5 preprocessing - compute tile metadata
  *
  * Must be called before spmv_csr5.

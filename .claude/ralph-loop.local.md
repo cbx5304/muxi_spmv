@@ -1,14 +1,14 @@
 ---
 active: true
-iteration: 2
+iteration: 1
 session_id: 
-max_iterations: 10
+max_iterations: 20
 completion_promise: null
-started_at: "2026-04-02T03:09:59Z"
+started_at: "2026-04-03T01:39:49Z"
 ---
 
-/ralph-loop:ralph-loop 在两台远程服务器上完成以下工作：
-1.穷尽一切手段分析X201为什么性能上不去，并尝试各种优化方案进行优化，以获取avgNnz<10的最佳性能。并形成完整的分析报告和优化对比报告。
+在两台远程服务器上完成以下工作：
+1.继续穷尽一切手段分析X201为什么性能上不去，并尝试各种优化方案进行优化（包括但不限于算法层面、kernel级硬件优化、解析汇编命令并优化等），以获取avgNnz<10的最佳性能。并形成完整的分析报告和优化对比报告。
 注意事项：
 1.远程服务器（chenbinxiangc@172.16.45.81，ssh端口19936，已配置好免密码）必须在/c/Users/Lenovo/cbx/spmv_muxi/下进行工作，严禁在其他目录写入或修改文件。且仅能使用这台服务器上的GPU7进行所有GPU计算、测试和其他任务。
 2.远程服务器（test@172.16.45.70 ssh端口3000，已配置好免密码）必须在/c/Users/Lenovo/cbx/spmv_muxi/下进行工作，严禁在其他目录写入或修改文件。
