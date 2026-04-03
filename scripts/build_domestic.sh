@@ -106,12 +106,35 @@ build_test_reorder() {
     rm -f $OBJ_FILES
 }
 
+build_test_global_reorder() {
+    echo "Building test_global_reorder..."
+    # Compile core sources
+    OBJ_FILES=""
+    for src in $CORE_SRCS $GEN_SRCS; do
+        obj=$(basename $src .cu).o
+        echo "Compiling $src..."
+        $NVCC $OPT_FLAGS $WARP_SIZE_FLAG $INCLUDE_FLAG -dc $src -o $obj
+        OBJ_FILES="$OBJ_FILES $obj"
+    done
+
+    # Step 2: Compile test_global_reorder and device-link all objects
+    $NVCC $OPT_FLAGS $WARP_SIZE_FLAG $INCLUDE_FLAG \
+        tests/test_global_reorder.cu \
+        $OBJ_FILES \
+        -o test_global_reorder \
+        -dl -lcudart
+
+    # Cleanup object files
+    rm -f $OBJ_FILES
+}
+
 build_all() {
     build_device_info
     build_test_spmv
     build_test_runner
     build_test_ellpack
     build_test_reorder
+    build_test_global_reorder
 }
 
 # 主入口
@@ -131,11 +154,14 @@ case "$1" in
     test_reorder)
         build_test_reorder
         ;;
+    test_global_reorder)
+        build_test_global_reorder
+        ;;
     all)
         build_all
         ;;
     *)
-        echo "Usage: $0 {device_info|test_spmv|test_runner|test_ellpack|test_reorder|all}"
+        echo "Usage: $0 {device_info|test_spmv|test_runner|test_ellpack|test_reorder|test_global_reorder|all}"
         echo "Note: Run with CUDA_VISIBLE_DEVICES=7 for GPU execution"
         exit 1
         ;;
