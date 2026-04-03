@@ -108,6 +108,10 @@ if(BUILD_TESTS)
     # Deep analysis runner (simplified)
     add_executable(deep_analysis tests/deep_analysis.cu)
     target_link_libraries(deep_analysis muxi_spmv)
+
+    # Column reorder test
+    add_executable(test_reorder tests/test_column_reorder.cu)
+    target_link_libraries(test_reorder muxi_spmv)
 endif()
 
 # Install targets
