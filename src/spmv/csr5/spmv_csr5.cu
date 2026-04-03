@@ -945,10 +945,19 @@ spmv_status_t spmv_merge_based(
     // The merge path length = numRows + nnz
     int mergePathLength = matrix.numRows + matrix.nnz;
 
-    // Aim for good load balancing: at least 64 elements per partition
-    int targetPartitions = mergePathLength / 64;
+    // Optimized partition strategy for Mars X201:
+    // - More partitions = better load balancing for sparse matrices
+    // - Each partition should handle ~16-32 elements for optimal balance
+    // - Key insight: merge-path search overhead is small compared to memory access
+
     int numSMs = (WARP_SIZE == 64) ? 104 : 128;  // Mars X201 or RTX 4090
-    int maxPartitions = numSMs * warpsPerBlock * 4;  // 4 blocks per SM for occupancy
+
+    // Use more partitions for better load balancing
+    int elementsPerPartition = (WARP_SIZE == 64) ? 16 : 32;  // Mars X201 needs more partitions
+    int targetPartitions = mergePathLength / elementsPerPartition;
+
+    // Allow more blocks per SM for better occupancy
+    int maxPartitions = numSMs * warpsPerBlock * 8;
 
     int numPartitions = max(1, min(targetPartitions, maxPartitions));
 
