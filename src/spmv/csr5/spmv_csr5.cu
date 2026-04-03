@@ -947,17 +947,27 @@ spmv_status_t spmv_merge_based(
 
     // Optimized partition strategy for Mars X201:
     // - More partitions = better load balancing for sparse matrices
-    // - Each partition should handle ~16-32 elements for optimal balance
+    // - Optimal elementsPerPartition = 16 (found through testing)
     // - Key insight: merge-path search overhead is small compared to memory access
 
     int numSMs = (WARP_SIZE == 64) ? 104 : 128;  // Mars X201 or RTX 4090
 
     // Use more partitions for better load balancing
-    int elementsPerPartition = (WARP_SIZE == 64) ? 16 : 32;  // Mars X201 needs more partitions
-    int targetPartitions = mergePathLength / elementsPerPartition;
+    int elementsPerPartition;
+    int maxPartitionMultiplier;
 
-    // Allow more blocks per SM for better occupancy
-    int maxPartitions = numSMs * warpsPerBlock * 8;
+    if (WARP_SIZE == 64) {
+        // Mars X201: Optimized for sparse matrices
+        elementsPerPartition = 16;  // Optimal value (tested: 64=14.5%, 16=22.3%, 8=18.6%)
+        maxPartitionMultiplier = 8;
+    } else {
+        // RTX 4090: Standard configuration
+        elementsPerPartition = 32;
+        maxPartitionMultiplier = 8;
+    }
+
+    int targetPartitions = mergePathLength / elementsPerPartition;
+    int maxPartitions = numSMs * warpsPerBlock * maxPartitionMultiplier;
 
     int numPartitions = max(1, min(targetPartitions, maxPartitions));
 
