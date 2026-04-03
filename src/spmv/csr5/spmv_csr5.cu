@@ -974,11 +974,12 @@ spmv_status_t spmv_merge_based(
     // For very sparse matrices (avgNnz < WarpSize/4), use sequential processing
     // For moderately sparse, use warp-cooperative
     if (WARP_SIZE == 64) {
-        // Mars X201 - use warp-cooperative for adaptive strategy
-        spmv_merge_based_warp_coop_kernel<FloatType, 256, 64><<<gridSize, blockSize, 0, stream>>>(
+        // Mars X201 - use original merge-based kernel (best performance so far)
+        // The warp-coop variant has overhead that hurts performance for very sparse matrices
+        spmv_merge_based_kernel<FloatType, 256, 64><<<gridSize, blockSize, 0, stream>>>(
             matrix.numRows, matrix.numCols, matrix.nnz,
             matrix.d_rowPtr, matrix.d_colIdx, matrix.d_values,
-            x, y, d_mergePathPos, numPartitions, avgNnzPerRow);
+            x, y, d_mergePathPos, numPartitions);
     } else {
         // RTX 4090 - use optimized sequential kernel
         spmv_merge_based_optimized_kernel<FloatType, 256, 32><<<gridSize, blockSize, 0, stream>>>(
