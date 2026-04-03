@@ -63,7 +63,9 @@ int main(int argc, char** argv) {
     CSRMatrix<float> matrix;
     int nnz = rows * avgNnz;
     generateRandomMatrix<float>(rows, cols, nnz, matrix);
-    matrix.copyToDevice();
+    matrix.allocateDevice();  // Allocate device memory first!
+    matrix.copyToDevice();    // Then copy
+    cudaDeviceSynchronize();  // Ensure copy is complete
 
     std::cout << "  Actual NNZ: " << matrix.nnz << "\n";
 
@@ -143,7 +145,9 @@ int main(int argc, char** argv) {
 
     // Sort columns within each row
     sortColumnsWithinRows(sortedMatrix);
+    sortedMatrix.allocateDevice();  // Allocate device memory first!
     sortedMatrix.copyToDevice();
+    cudaDeviceSynchronize();  // Ensure copy is complete
 
     totalTime = 0;
     for (int i = 0; i < iterations; i++) {
@@ -184,7 +188,9 @@ int main(int argc, char** argv) {
 
     CSRMatrix<float> bandedMatrix;
     generateBandedMatrix<float>(rows, 10, bandedMatrix);  // bandwidth=10
+    bandedMatrix.allocateDevice();  // Allocate device memory first!
     bandedMatrix.copyToDevice();
+    cudaDeviceSynchronize();  // Ensure copy is complete
 
     totalTime = 0;
     for (int i = 0; i < iterations; i++) {
