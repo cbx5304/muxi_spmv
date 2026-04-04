@@ -83,11 +83,11 @@ bool loadMatrixMarket(const std::string& filename, CSRMatrix<float>& matrix) {
               });
 
     // Convert to CSR
-    matrix.h_rowPtr = new int[rows + 1];
-    matrix.h_colIdx = new int[nnz];
-    matrix.h_values = new float[nnz];
+    matrix.rowPtr = new int[rows + 1];
+    matrix.colIdx = new int[nnz];
+    matrix.values = new float[nnz];
 
-    matrix.h_rowPtr[0] = 0;
+    matrix.rowPtr[0] = 0;
     int currentRow = 0;
     for (int i = 0; i < nnz; i++) {
         int r = std::get<0>(entries[i]);
@@ -96,14 +96,14 @@ bool loadMatrixMarket(const std::string& filename, CSRMatrix<float>& matrix) {
 
         while (currentRow < r) {
             currentRow++;
-            matrix.h_rowPtr[currentRow] = i;
+            matrix.rowPtr[currentRow] = i;
         }
-        matrix.h_colIdx[i] = c;
-        matrix.h_values[i] = v;
+        matrix.colIdx[i] = c;
+        matrix.values[i] = v;
     }
     while (currentRow < rows) {
         currentRow++;
-        matrix.h_rowPtr[currentRow] = nnz;
+        matrix.rowPtr[currentRow] = nnz;
     }
 
     return true;
@@ -322,8 +322,8 @@ void runTest(const std::string& matrixFile, const std::string& xFile, int iterat
     bool valid = true;
     for (int i = 0; i < 10 && valid; i++) {
         float expected = 0;
-        for (int j = matrix.h_rowPtr[i]; j < matrix.h_rowPtr[i + 1]; j++) {
-            expected += matrix.h_values[j] * h_x[matrix.h_colIdx[j]];
+        for (int j = matrix.rowPtr[i]; j < matrix.rowPtr[i + 1]; j++) {
+            expected += matrix.values[j] * h_x[matrix.colIdx[j]];
         }
         if (fabs(h_y[i] - expected) > 1e-3) {
             std::cerr << "Verification failed at row " << i << ": "
