@@ -87,6 +87,18 @@ All tests conducted on matrices with:
 
 **Finding**: Pinned Memory is the ONLY major E2E optimization.
 
+### 8. Warp-Level Reduction Strategies (Final Test)
+
+| Strategy | Mars X201 | RTX 4090 |
+|----------|-----------|----------|
+| Tree Reduce | 26.54% | 229.13% |
+| Butterfly Reduce | 26.53% | 229.57% |
+| Shared Mem Reduce | 26.50% | 228.63% |
+| Max Registers | 26.45% | 219.45% |
+| No Restrict | 26.50% | 229.15% |
+
+**Finding**: All warp-level strategies converge to same performance. Max Registers is slightly WORSE on RTX 4090.
+
 ---
 
 ## Root Cause Analysis
@@ -219,6 +231,15 @@ __global__ void spmv_optimal(int numRows, const int* __restrict__ rowPtr,
 5. **Pinned Memory critical**: Only optimization with major E2E impact (+140%)
 
 6. **End-to-end performance good**: Despite kernel limitation, E2E is 2.2x faster than RTX 4090
+
+7. **All optimization strategies tested exhaustively**:
+   - ILP (dual/quad accumulator): No improvement beyond baseline
+   - Software prefetch: +0.1% (negligible)
+   - Loop unrolling: No improvement
+   - Vectorized loads: -43% (worse!)
+   - Warp reduction variants: All converge to same limit
+   - Launch bounds: Slightly worse on RTX 4090
+   - Restrict keyword: No measurable impact
 
 ---
 

@@ -48,10 +48,20 @@ build_test_runner() {
         -lcusparse
 }
 
+build_test_kernel_comparison() {
+    echo "Building test_kernel_comparison..."
+    $NVCC $OPT_FLAGS $WARP_SIZE_FLAG $INCLUDE_FLAG \
+        $CORE_SRCS \
+        $GEN_SRCS \
+        tests/test_kernel_comparison.cu \
+        -o test_kernel_comparison
+}
+
 build_all() {
     build_device_info
     build_test_spmv
     build_test_runner
+    build_test_kernel_comparison
 }
 
 # 主入口
@@ -65,11 +75,14 @@ case "$1" in
     test_runner)
         build_test_runner
         ;;
+    test_kernel_comparison)
+        build_test_kernel_comparison
+        ;;
     all)
         build_all
         ;;
     *)
-        echo "Usage: $0 {device_info|test_spmv|test_runner|all}"
+        echo "Usage: $0 {device_info|test_spmv|test_runner|test_kernel_comparison|all}"
         exit 1
         ;;
 esac
