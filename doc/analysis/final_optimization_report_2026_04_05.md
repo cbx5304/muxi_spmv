@@ -1,4 +1,13 @@
-# Mars X201 SpMV 穷尽性优化最终报告
+# Mars X201 SpMV 穷尽性优化最终报告 (更新版)
+
+## 重要发现: 不同平台最优线程配置不同！
+
+经过全矩阵验证，发现最优线程配置与之前理解不同：
+
+| 平台 | 最优配置 | 利用率 | 之前认为最优 |
+|------|----------|--------|-------------|
+| **Mars X201** | **4t/row** | **26.70%** | 8t/row |
+| **RTX 4090** | **2t/row** | **118.98%** | 4t/row |
 
 ## 执行摘要
 
@@ -86,20 +95,18 @@
 cudaMallocHost(&h_x, numCols * sizeof(float));  // Pinned Memory (关键!)
 
 // Kernel配置
-const int THREADS_PER_ROW = 8;    // 最优: 8线程/行
-const int BLOCK_SIZE = 64;       // 最优: 64-256均可
+const int THREADS_PER_ROW = 4;    // 最优: 4线程/行 (不是8!)
+const int BLOCK_SIZE = 512;      // 最优: 512
 const int NUM_STREAMS = 2;       // 最优: 2流
 
 // Kernel核心
 template<int BLOCK_SIZE, int TPR>
 __global__ void spmv_optimized(...) {
-    float sum0 = 0, sum1 = 0, sum2 = 0, sum3 = 0;  // Quad Accum
-    while (idx + TPR * 3 < rowEnd) {
+    float sum0 = 0, sum1 = 0;  // Dual Accum for 4t/row
+    int idx = rowStart + threadInRow;
+    for (; idx + 4 < rowEnd; idx += 8) {
         sum0 += values[idx] * __ldg(&x[colIdx[idx]]);
-        sum1 += values[idx + TPR] * __ldg(&x[colIdx[idx + TPR]]);
-        sum2 += values[idx + TPR * 2] * __ldg(&x[colIdx[idx + TPR * 2]]);
-        sum3 += values[idx + TPR * 3] * __ldg(&x[colIdx[idx + TPR * 3]]);
-        idx += TPR * 4;
+        sum1 += values[idx + 4] * __ldg(&x[colIdx[idx + 4]]);
     }
     // ... reduction ...
 }
@@ -112,12 +119,24 @@ __global__ void spmv_optimized(...) {
 cudaMallocHost(&h_x, numCols * sizeof(float));  // Pinned Memory
 
 // Kernel配置
-const int THREADS_PER_ROW = 4;    // 最优: 4线程/行 (不同于Mars!)
-const int BLOCK_SIZE = 256;      // 最优: 256
+const int THREADS_PER_ROW = 2;    // 最优: 2线程/行 (不是4!)
+const int BLOCK_SIZE = 512;      // 最优: 512
 const int NUM_STREAMS = 2;       // 最优: 2流
 
 // 额外优化
 applyRCMColumnReordering();      // RCM重排序 (+11.4%)
+
+// Kernel核心
+template<int BLOCK_SIZE, int TPR>
+__global__ void spmv_optimized(...) {
+    float sum0 = 0, sum1 = 0;  // Dual Accum for 2t/row
+    int idx = rowStart + threadInRow;
+    for (; idx + 2 < rowEnd; idx += 4) {
+        sum0 += values[idx] * __ldg(&x[colIdx[idx]]);
+        sum1 += values[idx + 2] * __ldg(&x[colIdx[idx + 2]]);
+    }
+    // ... reduction ...
+}
 ```
 
 ---
@@ -141,7 +160,52 @@ applyRCMColumnReordering();      // RCM重排序 (+11.4%)
 
 ---
 
-## 四、硬件瓶颈分析
+## 四、关键发现：线程配置优化
+
+### 4.1 测试结果对比
+
+**Mars X201 (WARP_SIZE=64):**
+
+| 配置 | 平均利用率 | 说明 |
+|------|-----------|------|
+| 8t/row | 26.16% | 之前认为最优 |
+| **4t/row** | **26.70%** | **实际最优** |
+| 2t/row | 20.63% | 过少线程导致效率下降 |
+
+**RTX 4090 (WARP_SIZE=32):**
+
+| 配置 | 平均利用率 | 说明 |
+|------|-----------|------|
+| 8t/row | 115.09% | 过多线程浪费 |
+| 4t/row | 118.43% | 接近最优 |
+| **2t/row** | **118.98%** | **实际最优** |
+
+### 4.2 原因分析
+
+1. **Mars X201需要更多行并行**：
+   - Warp Size = 64
+   - 4t/row → 16行/warp → 更好的并行度
+   - 8t/row → 8行/warp → 并行度不足
+
+2. **RTX 4090需要更多线程/行**：
+   - Warp Size = 32
+   - 2t/row → 16行/warp → 最优平衡
+   - 4t/row → 8行/warp → 略少
+
+### 4.3 实践建议
+
+```cpp
+// 平台自适应配置
+#if WARP_SIZE == 64
+    const int THREADS_PER_ROW = 4;   // Mars X201
+#else
+    const int THREADS_PER_ROW = 2;   // RTX 4090
+#endif
+```
+
+---
+
+## 五、硬件瓶颈分析
 
 ### 4.1 L2 Cache影响
 
