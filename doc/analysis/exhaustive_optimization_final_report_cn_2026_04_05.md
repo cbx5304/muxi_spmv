@@ -243,6 +243,39 @@ __global__ void spmv_optimal(int numRows, const int* __restrict__ rowPtr,
 | test_real_matrix_pattern.cu | 真实矩阵特征分析 |
 | test_warp_level_optimizations.cu | Warp级优化测试 |
 | test_optimized_variants_comparison.cu | 全变体比较 |
+| test_format_comparison.cu | **格式对比测试（最终验证）** |
+
+---
+
+## 最终格式对比测试结果 (2026-04-05)
+
+### Mars X201 (warp=64)
+
+| 格式/Kernel | 利用率 | 时间(ms) | 分析 |
+|-------------|--------|----------|------|
+| **CSR 4t/row** | **26.63%** | 0.335 | ✅ 最优方案 |
+| CSR 8t/row | 26.55% | 0.336 | 接近最优 |
+| CSR 2t/row | 22.97% | 0.389 | 并行度不足 |
+| CSR5-style | 14.97% | 0.596 | ❌ 原子操作开销 |
+| Merge-based | 2.43% | 3.671 | ❌ 分区计算开销 |
+
+### RTX 4090 (warp=32)
+
+| 格式/Kernel | 利用率 | 时间(ms) | 分析 |
+|-------------|--------|----------|------|
+| **CSR 4t/row** | **118.46%** | 0.138 | ✅ 最优，L2缓存效应 |
+| CSR 2t/row | 118.15% | 0.138 | 同样优秀 |
+| CSR 8t/row | 115.72% | 0.141 | 并行度略高 |
+| CSR5-style | 86.83% | 0.188 | 原子操作开销 |
+| Merge-based | 20.55% | 0.794 | 分区计算开销 |
+
+### 关键结论
+
+1. **CSR Vector (4t/row) 是最优方案** - 两个平台均表现最佳
+2. **CSR5不适合avgNnz<64的矩阵** - 原子操作开销大于收益
+3. **Merge-based表现最差** - 分区计算开销完全抵消负载均衡收益
+4. **RTX 4090超带宽利用率** - 72MB L2缓存命中导致有效带宽超过理论峰值
+5. **Mars X201已达硬件极限** - 4MB L2缓存无法容纳4.79MB x向量
 
 ---
 
