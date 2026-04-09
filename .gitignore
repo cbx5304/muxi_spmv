@@ -45,3 +45,9 @@ doc/generated/
 # Temporary files
 *.tmp
 *.temp
+
+# Large data files (test matrices)
+real_cases/
+*.tar.gz
+*.zip
+*.mtx
