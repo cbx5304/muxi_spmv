@@ -3,9 +3,24 @@
 ## 文档信息
 
 - **创建日期**: 2026-04-09
-- **更新日期**: 2026-04-09 (穷尽性优化测试完成)
+- **更新日期**: 2026-04-09 (重大发现: Vector Kernel更优!)
 - **测试平台**: Mars X201 (国产GPU) vs RTX 4090 (NVIDIA)
 - **测试矩阵**: 真实矩阵 (1.26M行, 13.5M NNZ, avgNnz=10.71)
+
+---
+
+## 🔥🔥🔥 重大发现 (2026-04-09 最新测试)
+
+### Vector 4t/row Kernel 是最优选择！
+
+| 内核 | 时间(μs) | 带宽(GB/s) | 利用率 | 加速比 | 线程数 |
+|------|----------|------------|--------|--------|--------|
+| **Vector 4t/row** | **345** | **780** | **42.3%** | **1.68x** ⭐⭐⭐ | 5.0M |
+| Scalar Unroll | 532 | 506 | 27.5% | 1.09x | 1.25M |
+| Simple Scalar | 580 | 465 | 25.2% | 1.00x | 1.25M |
+| ILP4 | 583 | 462 | 25.1% | 0.99x | 1.25M |
+
+**关键原因**: Vector kernel启动4倍线程(5M vs 1.25M)，更好地隐藏内存延迟！
 
 ---
 
@@ -13,12 +28,13 @@
 
 经过穷尽性优化测试，确定了Mars X201 GPU上FP64 SpMV性能瓶颈的**根本原因**：
 
-> **L2 Cache大小差异 (2-4MB vs 72MB) 导致随机内存访问性能差距22.8倍**
+> **L2 Cache大小差异 (2-4MB vs 72MB) 导致随机内存访问性能差距**
 
 **核心结论**：
-1. 软件优化无法突破硬件限制
-2. Mars X201端到端性能优于RTX 4090 (Pinned Memory优化)
-3. **最新发现**: blockSize=128 + PreferShared 是Mars X201最优配置
+1. **Vector 4t/row是最优内核** (利用率42.3% vs 25.2%)
+2. 软件优化可以显著提升性能 (通过增加线程隐藏延迟)
+3. Mars X201端到端性能优于RTX 4090 (Pinned Memory优化)
+4. blockSize=128 + PreferShared 是最优配置
 
 ---
 
@@ -74,30 +90,55 @@
 
 ## 最终最优配置
 
-### Mars X201最优配置 (FP64)
+### Mars X201最优配置 (FP64) - 更新版
 
 ```cpp
 // 1. Pinned Memory (必须!)
 double* h_x;
 cudaMallocHost(&h_x, numCols * sizeof(double));
 
-// 2. 线程配置
-int blockSize = 128;   // 最优blockSize
-int gridSize = (numRows + blockSize - 1) / blockSize;
+// 2. 线程配置 - Vector Kernel最优!
+int threadsPerRow = 4;   // 4t/row最优
+int blockSize = 128;
+int gridSize = (numRows * threadsPerRow + blockSize - 1) / blockSize;
 
 // 3. Cache配置 (关键优化!)
-cudaFuncSetCacheConfig(kernel, cudaFuncCachePreferShared);  // 或 PreferEqual
+cudaFuncSetCacheConfig(vector_kernel<4>, cudaFuncCachePreferShared);
 
-// 4. 最优内核 (简单SCALAR)
-__global__ void scalar_spmv_kernel(
-    int numRows, const int* rowPtr, const int* colIdx,
-    const double* values, const double* x, double* y)
+// 4. 最优内核 (Vector 4t/row) - 1.68x加速!
+template<int THREADS_PER_ROW>
+__global__ void vector_kernel(
+    int numRows, const int* __restrict__ rowPtr, const int* __restrict__ colIdx,
+    const double* __restrict__ values, const double* __restrict__ x, double* __restrict__ y)
 {
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= numRows) return;
+    const int WARP_SIZE = 64;  // Mars X201 warp size
+    int warpId = (blockIdx.x * blockDim.x + threadIdx.x) / WARP_SIZE;
+    int laneId = threadIdx.x % WARP_SIZE;
+    int row = warpId * (WARP_SIZE / THREADS_PER_ROW) + laneId / THREADS_PER_ROW;
     
+    if (row >= numRows) return;
+    
+    int rowStart = rowPtr[row], rowEnd = rowPtr[row + 1];
     double sum = 0.0;
-    for (int i = rowPtr[tid]; i < rowPtr[tid + 1]; i++) {
+    
+    // Each thread processes stride elements
+    for (int i = rowStart + (laneId % THREADS_PER_ROW); i < rowEnd; i += THREADS_PER_ROW) {
+        sum += values[i] * x[colIdx[i]];
+    }
+    
+    // Warp reduction
+    for (int offset = THREADS_PER_ROW / 2; offset > 0; offset /= 2) {
+        sum += __shfl_down_sync(0xffffffff, sum, offset);
+    }
+    
+    if (laneId % THREADS_PER_ROW == 0) {
+        y[row] = sum;
+    }
+}
+
+// 5. 备选: 简单Scalar (如果Vector kernel不可用)
+// 时间约580us，利用率25%
+```
         sum += values[i] * x[colIdx[i]];
     }
     y[tid] = sum;
