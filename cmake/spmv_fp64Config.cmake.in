@@ -1,0 +1,5 @@
+@PACKAGE_INIT@
+
+include("${CMAKE_CURRENT_LIST_DIR}/spmv_fp64-targets.cmake")
+
+check_required_components(spmv_fp64)
