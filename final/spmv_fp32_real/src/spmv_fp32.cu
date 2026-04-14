@@ -1,10 +1,10 @@
 /**
- * @file spmv_fp64.cu
- * @brief Main implementation of FP64 SpMV library
+ * @file spmv_fp32.cu
+ * @brief Main implementation of FP32 SpMV library
  */
 
-#include "spmv_fp64.h"
-#include "spmv_fp64_impl.cuh"
+#include "spmv_fp32.h"
+#include "spmv_fp32_impl.cuh"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -65,9 +65,9 @@ static int check_license_internal(void) {
 
     // Print license status once
     if (licenseValid) {
-        printf("[SPMV_FP64] License valid until %s (trial version)\n", LICENSE_EXPIRY_STRING);
+        printf("[SPMV_FP32] License valid until %s (trial version)\n", LICENSE_EXPIRY_STRING);
     } else {
-        fprintf(stderr, "[SPMV_FP64] ERROR: License expired on %s. Please contact vendor for renewal.\n", LICENSE_EXPIRY_STRING);
+        fprintf(stderr, "[SPMV_FP32] ERROR: License expired on %s. Please contact vendor for renewal.\n", LICENSE_EXPIRY_STRING);
     }
 
     return licenseValid;
@@ -75,20 +75,20 @@ static int check_license_internal(void) {
 
 // ==================== Public License API ====================
 
-spmv_fp64_status_t spmv_fp64_check_license(void) {
+spmv_fp32_status_t spmv_fp32_check_license(void) {
     if (check_license_internal()) {
-        return SPMV_FP64_SUCCESS;
+        return SPMV_FP32_SUCCESS;
     }
-    return SPMV_FP64_ERROR_LICENSE_EXPIRED;
+    return SPMV_FP32_ERROR_LICENSE_EXPIRED;
 }
 
-const char* spmv_fp64_get_license_expiry(void) {
+const char* spmv_fp32_get_license_expiry(void) {
     return LICENSE_EXPIRY_STRING;
 }
 
 // ==================== Internal Matrix Structure ====================
 
-struct spmv_fp64_matrix_t {
+struct spmv_fp32_matrix_t {
     int numRows;
     int numCols;
     int nnz;
@@ -96,19 +96,19 @@ struct spmv_fp64_matrix_t {
     // Host data (pinned memory if ownsHostMemory)
     int* h_rowPtr;
     int* h_colIdx;
-    double* h_values;
+    float* h_values;
 
     // Device data
     int* d_rowPtr;
     int* d_colIdx;
-    double* d_values;
+    float* d_values;
 
     // Internal device vectors for execute (host pointer mode)
-    double* d_x_internal;
-    double* d_y_internal;
+    float* d_x_internal;
+    float* d_y_internal;
 
     // Options
-    spmv_fp64_opts_t opts;
+    spmv_fp32_opts_t opts;
 
     // GPU info
     int warpSize;
@@ -127,14 +127,14 @@ static int load_mtx_file(
     const char* filename,
     int** rowPtr,
     int** colIdx,
-    double** values,
+    float** values,
     int* numRows,
     int* numCols,
     int* nnz)
 {
     FILE* fp = fopen(filename, "r");
     if (!fp) {
-        fprintf(stderr, "[SPMV_FP64] Error: Cannot open file %s\n", filename);
+        fprintf(stderr, "[SPMV_FP32] Error: Cannot open file %s\n", filename);
         return -1;
     }
 
@@ -167,7 +167,7 @@ static int load_mtx_file(
     // Allocate COO arrays
     int* coo_row = (int*)malloc(n * sizeof(int));
     int* coo_col = (int*)malloc(n * sizeof(int));
-    double* coo_val = (double*)malloc(n * sizeof(double));
+    float* coo_val = (float*)malloc(n * sizeof(float));
 
     if (!coo_row || !coo_col || !coo_val) {
         free(coo_row);
@@ -179,7 +179,7 @@ static int load_mtx_file(
 
     // Read COO data
     for (int i = 0; i < n; i++) {
-        double v = 1.0;  // Default value if not provided
+        double v = 1.0;  // Default value if not provided (use double for reading)
         int numRead = fscanf(fp, "%d %d %lf", &coo_row[i], &coo_col[i], &v);
         if (numRead < 2) {
             free(coo_row);
@@ -191,9 +191,9 @@ static int load_mtx_file(
         coo_row[i]--;  // MTX is 1-indexed
         coo_col[i]--;
         if (numRead == 2) {
-            coo_val[i] = 1.0;  // Pattern matrix
+            coo_val[i] = 1.0f;  // Pattern matrix
         } else {
-            coo_val[i] = v;
+            coo_val[i] = (float)v;
         }
     }
     fclose(fp);
@@ -219,7 +219,7 @@ static int load_mtx_file(
 
     // Allocate CSR arrays
     *colIdx = (int*)malloc(n * sizeof(int));
-    *values = (double*)malloc(n * sizeof(double));
+    *values = (float*)malloc(n * sizeof(float));
 
     if (!*colIdx || !*values) {
         free(*rowPtr);
@@ -247,7 +247,7 @@ static int load_mtx_file(
     return 0;
 }
 
-static void get_gpu_info(spmv_fp64_matrix_handle_t handle) {
+static void get_gpu_info(spmv_fp32_matrix_handle_t handle) {
     cudaDeviceProp prop;
     cudaGetDeviceProperties(&prop, 0);
 
@@ -272,42 +272,42 @@ static void get_gpu_info(spmv_fp64_matrix_handle_t handle) {
 
 // ==================== Matrix Management API ====================
 
-spmv_fp64_status_t spmv_fp64_create_matrix(
-    spmv_fp64_matrix_handle_t* handle,
+spmv_fp32_status_t spmv_fp32_create_matrix(
+    spmv_fp32_matrix_handle_t* handle,
     int numRows,
     int numCols,
     int nnz,
     const int* rowPtr,
     const int* colIdx,
-    const double* values,
-    const spmv_fp64_opts_t* opts)
+    const float* values,
+    const spmv_fp32_opts_t* opts)
 {
     // License check
     if (!check_license_internal()) {
-        return SPMV_FP64_ERROR_LICENSE_EXPIRED;
+        return SPMV_FP32_ERROR_LICENSE_EXPIRED;
     }
 
     if (!handle || !rowPtr || !colIdx || !values) {
-        return SPMV_FP64_ERROR_INVALID_INPUT;
+        return SPMV_FP32_ERROR_INVALID_INPUT;
     }
 
     if (numRows <= 0 || numCols <= 0 || nnz < 0) {
-        return SPMV_FP64_ERROR_INVALID_INPUT;
+        return SPMV_FP32_ERROR_INVALID_INPUT;
     }
 
     // Allocate handle
-    spmv_fp64_matrix_handle_t mat = (spmv_fp64_matrix_handle_t)
-        calloc(1, sizeof(struct spmv_fp64_matrix_t));
+    spmv_fp32_matrix_handle_t mat = (spmv_fp32_matrix_handle_t)
+        calloc(1, sizeof(struct spmv_fp32_matrix_t));
 
     if (!mat) {
-        return SPMV_FP64_ERROR_MEMORY;
+        return SPMV_FP32_ERROR_MEMORY;
     }
 
     // Set options
     if (opts) {
         mat->opts = *opts;
     } else {
-        mat->opts = SPMV_FP64_DEFAULT_OPTS;
+        mat->opts = SPMV_FP32_DEFAULT_OPTS;
     }
 
     mat->numRows = numRows;
@@ -320,51 +320,51 @@ spmv_fp64_status_t spmv_fp64_create_matrix(
     // Allocate pinned host memory for CSR data (always use pinned for best performance)
     cudaMallocHost(&mat->h_rowPtr, (numRows + 1) * sizeof(int));
     cudaMallocHost(&mat->h_colIdx, nnz * sizeof(int));
-    cudaMallocHost(&mat->h_values, nnz * sizeof(double));
+    cudaMallocHost(&mat->h_values, nnz * sizeof(float));
 
     if (!mat->h_rowPtr || !mat->h_colIdx || !mat->h_values) {
-        spmv_fp64_destroy_matrix(mat);
-        return SPMV_FP64_ERROR_MEMORY;
+        spmv_fp32_destroy_matrix(mat);
+        return SPMV_FP32_ERROR_MEMORY;
     }
 
     memcpy(mat->h_rowPtr, rowPtr, (numRows + 1) * sizeof(int));
     memcpy(mat->h_colIdx, colIdx, nnz * sizeof(int));
-    memcpy(mat->h_values, values, nnz * sizeof(double));
+    memcpy(mat->h_values, values, nnz * sizeof(float));
 
     mat->ownsHostMemory = 1;
 
     // Allocate device memory for CSR data
     cudaError_t err = cudaMalloc(&mat->d_rowPtr, (numRows + 1) * sizeof(int));
     if (err != cudaSuccess) {
-        spmv_fp64_destroy_matrix(mat);
-        return SPMV_FP64_ERROR_CUDA;
+        spmv_fp32_destroy_matrix(mat);
+        return SPMV_FP32_ERROR_CUDA;
     }
 
     err = cudaMalloc(&mat->d_colIdx, nnz * sizeof(int));
     if (err != cudaSuccess) {
-        spmv_fp64_destroy_matrix(mat);
-        return SPMV_FP64_ERROR_CUDA;
+        spmv_fp32_destroy_matrix(mat);
+        return SPMV_FP32_ERROR_CUDA;
     }
 
-    err = cudaMalloc(&mat->d_values, nnz * sizeof(double));
+    err = cudaMalloc(&mat->d_values, nnz * sizeof(float));
     if (err != cudaSuccess) {
-        spmv_fp64_destroy_matrix(mat);
-        return SPMV_FP64_ERROR_CUDA;
+        spmv_fp32_destroy_matrix(mat);
+        return SPMV_FP32_ERROR_CUDA;
     }
 
     mat->ownsDeviceCSR = 1;
 
     // Allocate internal device vectors for execute
-    err = cudaMalloc(&mat->d_x_internal, numCols * sizeof(double));
+    err = cudaMalloc(&mat->d_x_internal, numCols * sizeof(float));
     if (err != cudaSuccess) {
-        spmv_fp64_destroy_matrix(mat);
-        return SPMV_FP64_ERROR_CUDA;
+        spmv_fp32_destroy_matrix(mat);
+        return SPMV_FP32_ERROR_CUDA;
     }
 
-    err = cudaMalloc(&mat->d_y_internal, numRows * sizeof(double));
+    err = cudaMalloc(&mat->d_y_internal, numRows * sizeof(float));
     if (err != cudaSuccess) {
-        spmv_fp64_destroy_matrix(mat);
-        return SPMV_FP64_ERROR_CUDA;
+        spmv_fp32_destroy_matrix(mat);
+        return SPMV_FP32_ERROR_CUDA;
     }
 
     mat->ownsDeviceVectors = 1;
@@ -372,7 +372,7 @@ spmv_fp64_status_t spmv_fp64_create_matrix(
     // Copy CSR data to device
     cudaMemcpy(mat->d_rowPtr, mat->h_rowPtr, (numRows + 1) * sizeof(int), cudaMemcpyHostToDevice);
     cudaMemcpy(mat->d_colIdx, mat->h_colIdx, nnz * sizeof(int), cudaMemcpyHostToDevice);
-    cudaMemcpy(mat->d_values, mat->h_values, nnz * sizeof(double), cudaMemcpyHostToDevice);
+    cudaMemcpy(mat->d_values, mat->h_values, nnz * sizeof(float), cudaMemcpyHostToDevice);
 
     // Set ownership flags for host-copy mode
     mat->ownsHostMemory = 1;
@@ -380,47 +380,47 @@ spmv_fp64_status_t spmv_fp64_create_matrix(
     mat->ownsDeviceVectors = 1;
 
     *handle = mat;
-    return SPMV_FP64_SUCCESS;
+    return SPMV_FP32_SUCCESS;
 }
 
 // ==================== Device-pointer Mode (Zero-copy) ====================
 
-spmv_fp64_status_t spmv_fp64_create_matrix_device(
-    spmv_fp64_matrix_handle_t* handle,
+spmv_fp32_status_t spmv_fp32_create_matrix_device(
+    spmv_fp32_matrix_handle_t* handle,
     int numRows,
     int numCols,
     int nnz,
     const int* d_rowPtr,
     const int* d_colIdx,
-    const double* d_values,
-    const spmv_fp64_opts_t* opts)
+    const float* d_values,
+    const spmv_fp32_opts_t* opts)
 {
     // License check
     if (!check_license_internal()) {
-        return SPMV_FP64_ERROR_LICENSE_EXPIRED;
+        return SPMV_FP32_ERROR_LICENSE_EXPIRED;
     }
 
     if (!handle || !d_rowPtr || !d_colIdx || !d_values) {
-        return SPMV_FP64_ERROR_INVALID_INPUT;
+        return SPMV_FP32_ERROR_INVALID_INPUT;
     }
 
     if (numRows <= 0 || numCols <= 0 || nnz < 0) {
-        return SPMV_FP64_ERROR_INVALID_INPUT;
+        return SPMV_FP32_ERROR_INVALID_INPUT;
     }
 
     // Allocate handle
-    spmv_fp64_matrix_handle_t mat = (spmv_fp64_matrix_handle_t)
-        calloc(1, sizeof(struct spmv_fp64_matrix_t));
+    spmv_fp32_matrix_handle_t mat = (spmv_fp32_matrix_handle_t)
+        calloc(1, sizeof(struct spmv_fp32_matrix_t));
 
     if (!mat) {
-        return SPMV_FP64_ERROR_MEMORY;
+        return SPMV_FP32_ERROR_MEMORY;
     }
 
     // Set options
     if (opts) {
         mat->opts = *opts;
     } else {
-        mat->opts = SPMV_FP64_DEFAULT_OPTS;
+        mat->opts = SPMV_FP32_DEFAULT_OPTS;
     }
 
     mat->numRows = numRows;
@@ -433,7 +433,7 @@ spmv_fp64_status_t spmv_fp64_create_matrix_device(
     // Use user-provided device pointers (zero-copy mode)
     mat->d_rowPtr = const_cast<int*>(d_rowPtr);
     mat->d_colIdx = const_cast<int*>(d_colIdx);
-    mat->d_values = const_cast<double*>(d_values);
+    mat->d_values = const_cast<float*>(d_values);
     mat->h_rowPtr = NULL;  // No host copy in this mode
     mat->h_colIdx = NULL;
     mat->h_values = NULL;
@@ -448,28 +448,28 @@ spmv_fp64_status_t spmv_fp64_create_matrix_device(
     mat->ownsDeviceVectors = 0;   // User will provide x/y
 
     *handle = mat;
-    return SPMV_FP64_SUCCESS;
+    return SPMV_FP32_SUCCESS;
 }
 
-spmv_fp64_status_t spmv_fp64_create_matrix_from_file(
-    spmv_fp64_matrix_handle_t* handle,
+spmv_fp32_status_t spmv_fp32_create_matrix_from_file(
+    spmv_fp32_matrix_handle_t* handle,
     const char* filename,
-    const spmv_fp64_opts_t* opts)
+    const spmv_fp32_opts_t* opts)
 {
     if (!handle || !filename) {
-        return SPMV_FP64_ERROR_INVALID_INPUT;
+        return SPMV_FP32_ERROR_INVALID_INPUT;
     }
 
     int* rowPtr = NULL;
     int* colIdx = NULL;
-    double* values = NULL;
+    float* values = NULL;
     int numRows, numCols, nnz;
 
     if (load_mtx_file(filename, &rowPtr, &colIdx, &values, &numRows, &numCols, &nnz) != 0) {
-        return SPMV_FP64_ERROR_INVALID_INPUT;
+        return SPMV_FP32_ERROR_INVALID_INPUT;
     }
 
-    spmv_fp64_status_t status = spmv_fp64_create_matrix(
+    spmv_fp32_status_t status = spmv_fp32_create_matrix(
         handle, numRows, numCols, nnz, rowPtr, colIdx, values, opts);
 
     // Free temporary arrays (create_matrix copied them)
@@ -480,9 +480,9 @@ spmv_fp64_status_t spmv_fp64_create_matrix_from_file(
     return status;
 }
 
-spmv_fp64_status_t spmv_fp64_destroy_matrix(spmv_fp64_matrix_handle_t handle) {
+spmv_fp32_status_t spmv_fp32_destroy_matrix(spmv_fp32_matrix_handle_t handle) {
     if (!handle) {
-        return SPMV_FP64_ERROR_INVALID_INPUT;
+        return SPMV_FP32_ERROR_INVALID_INPUT;
     }
 
     // Free internal vectors if library allocated them
@@ -506,80 +506,80 @@ spmv_fp64_status_t spmv_fp64_destroy_matrix(spmv_fp64_matrix_handle_t handle) {
     }
 
     free(handle);
-    return SPMV_FP64_SUCCESS;
+    return SPMV_FP32_SUCCESS;
 }
 
-spmv_fp64_status_t spmv_fp64_get_matrix_info(
-    spmv_fp64_matrix_handle_t handle,
+spmv_fp32_status_t spmv_fp32_get_matrix_info(
+    spmv_fp32_matrix_handle_t handle,
     int* numRows,
     int* numCols,
     int* nnz)
 {
     if (!handle) {
-        return SPMV_FP64_ERROR_INVALID_INPUT;
+        return SPMV_FP32_ERROR_INVALID_INPUT;
     }
 
     if (numRows) *numRows = handle->numRows;
     if (numCols) *numCols = handle->numCols;
     if (nnz) *nnz = handle->nnz;
 
-    return SPMV_FP64_SUCCESS;
+    return SPMV_FP32_SUCCESS;
 }
 
 // ==================== SpMV Execution API ====================
 
-spmv_fp64_status_t spmv_fp64_execute(
-    spmv_fp64_matrix_handle_t handle,
-    const double* x,
-    double* y,
-    const spmv_fp64_opts_t* opts,
-    spmv_fp64_stats_t* stats)
+spmv_fp32_status_t spmv_fp32_execute(
+    spmv_fp32_matrix_handle_t handle,
+    const float* x,
+    float* y,
+    const spmv_fp32_opts_t* opts,
+    spmv_fp32_stats_t* stats)
 {
-    return spmv_fp64_execute_general(handle, 1.0, 0.0, x, y, opts, stats);
+    return spmv_fp32_execute_general(handle, 1.0f, 0.0f, x, y, opts, stats);
 }
 
-spmv_fp64_status_t spmv_fp64_execute_scaled(
-    spmv_fp64_matrix_handle_t handle,
-    double alpha,
-    const double* x,
-    double* y,
-    const spmv_fp64_opts_t* opts,
-    spmv_fp64_stats_t* stats)
+spmv_fp32_status_t spmv_fp32_execute_scaled(
+    spmv_fp32_matrix_handle_t handle,
+    float alpha,
+    const float* x,
+    float* y,
+    const spmv_fp32_opts_t* opts,
+    spmv_fp32_stats_t* stats)
 {
-    return spmv_fp64_execute_general(handle, alpha, 0.0, x, y, opts, stats);
+    return spmv_fp32_execute_general(handle, alpha, 0.0f, x, y, opts, stats);
 }
 
-spmv_fp64_status_t spmv_fp64_execute_general(
-    spmv_fp64_matrix_handle_t handle,
-    double alpha,
-    double beta,
-    const double* x,
-    double* y,
-    const spmv_fp64_opts_t* opts,
-    spmv_fp64_stats_t* stats)
+spmv_fp32_status_t spmv_fp32_execute_general(
+    spmv_fp32_matrix_handle_t handle,
+    float alpha,
+    float beta,
+    const float* x,
+    float* y,
+    const spmv_fp32_opts_t* opts,
+    spmv_fp32_stats_t* stats)
 {
     if (!handle || !x || !y) {
-        return SPMV_FP64_ERROR_INVALID_INPUT;
+        return SPMV_FP32_ERROR_INVALID_INPUT;
     }
 
     // Host-pointer mode requires internal vectors
     if (!handle->ownsDeviceVectors || !handle->d_x_internal || !handle->d_y_internal) {
         // Matrix was created with device pointers, use execute_device instead
-        return SPMV_FP64_ERROR_NOT_SUPPORTED;
+        return SPMV_FP32_ERROR_NOT_SUPPORTED;
     }
 
     // Use provided options or matrix default
-    spmv_fp64_opts_t execOpts = opts ? *opts : handle->opts;
+    spmv_fp32_opts_t execOpts = opts ? *opts : handle->opts;
     cudaStream_t stream = execOpts.stream ? execOpts.stream : 0;
 
     // Copy x to device (using internal buffer)
-    cudaMemcpyAsync(handle->d_x_internal, x, handle->numCols * sizeof(double),
+    cudaMemcpyAsync(handle->d_x_internal, x, handle->numCols * sizeof(float),
                     cudaMemcpyHostToDevice, stream);
 
     // Launch optimal kernel based on warp size
     if (handle->warpSize == 64) {
         // Mars X201: Use adaptive TPR kernel based on avgNnz
-        spmv_fp64_impl::launch_mars_adaptive(
+        spmv_fp32_impl::launch_mars_adaptive(
             handle->numRows,
             handle->nnz,
             handle->d_rowPtr,
@@ -590,7 +590,7 @@ spmv_fp64_status_t spmv_fp64_execute_general(
             stream);
     } else {
         // NVIDIA: Use __ldg kernel
-        spmv_fp64_impl::launch_nvidia_optimal(
+        spmv_fp32_impl::launch_nvidia_optimal(
             handle->numRows,
             handle->d_rowPtr,
             handle->d_colIdx,
@@ -601,7 +601,7 @@ spmv_fp64_status_t spmv_fp64_execute_general(
     }
 
     // Copy y back to host
-    cudaMemcpyAsync(y, handle->d_y_internal, handle->numRows * sizeof(double),
+    cudaMemcpyAsync(y, handle->d_y_internal, handle->numRows * sizeof(float),
                     cudaMemcpyDeviceToHost, stream);
 
     // Synchronize if requested
@@ -616,11 +616,11 @@ spmv_fp64_status_t spmv_fp64_execute_general(
 
         auto start = std::chrono::high_resolution_clock::now();
         for (int i = 0; i < iterations; i++) {
-            cudaMemcpyAsync(handle->d_x_internal, x, handle->numCols * sizeof(double),
+            cudaMemcpyAsync(handle->d_x_internal, x, handle->numCols * sizeof(float),
                             cudaMemcpyHostToDevice, stream);
 
             if (handle->warpSize == 64) {
-                spmv_fp64_impl::launch_mars_adaptive(
+                spmv_fp32_impl::launch_mars_adaptive(
                     handle->numRows,
                     handle->nnz,
                     handle->d_rowPtr,
@@ -630,7 +630,7 @@ spmv_fp64_status_t spmv_fp64_execute_general(
                     handle->d_y_internal,
                     stream);
             } else {
-                spmv_fp64_impl::launch_nvidia_optimal(
+                spmv_fp32_impl::launch_nvidia_optimal(
                     handle->numRows,
                     handle->d_rowPtr,
                     handle->d_colIdx,
@@ -647,7 +647,7 @@ spmv_fp64_status_t spmv_fp64_execute_general(
 
         // Fill stats
         stats->kernel_time_ms = timeMs;
-        stats->bandwidth_gbps = spmv_fp64_impl::calculate_bandwidth(
+        stats->bandwidth_gbps = spmv_fp32_impl::calculate_bandwidth(
             handle->nnz, handle->numRows, timeMs);
         stats->theoretical_bw = handle->theoreticalBW;
         stats->utilization_pct = (stats->bandwidth_gbps / stats->theoretical_bw) * 100.0;
@@ -657,31 +657,31 @@ spmv_fp64_status_t spmv_fp64_execute_general(
         stats->gpu_name = handle->gpuName;
     }
 
-    return SPMV_FP64_SUCCESS;
+    return SPMV_FP32_SUCCESS;
 }
 
 // ==================== Utility Functions ====================
 
-spmv_fp64_status_t spmv_fp64_alloc_pinned(void** ptr, size_t size) {
+spmv_fp32_status_t spmv_fp32_alloc_pinned(void** ptr, size_t size) {
     cudaError_t err = cudaMallocHost(ptr, size);
     if (err != cudaSuccess) {
-        return SPMV_FP64_ERROR_CUDA;
+        return SPMV_FP32_ERROR_CUDA;
     }
-    return SPMV_FP64_SUCCESS;
+    return SPMV_FP32_SUCCESS;
 }
 
-spmv_fp64_status_t spmv_fp64_free_pinned(void* ptr) {
+spmv_fp32_status_t spmv_fp32_free_pinned(void* ptr) {
     if (!ptr) {
-        return SPMV_FP64_ERROR_INVALID_INPUT;
+        return SPMV_FP32_ERROR_INVALID_INPUT;
     }
     cudaError_t err = cudaFreeHost(ptr);
     if (err != cudaSuccess) {
-        return SPMV_FP64_ERROR_CUDA;
+        return SPMV_FP32_ERROR_CUDA;
     }
-    return SPMV_FP64_SUCCESS;
+    return SPMV_FP32_SUCCESS;
 }
 
-spmv_fp64_status_t spmv_fp64_get_device_info(
+spmv_fp32_status_t spmv_fp32_get_device_info(
     int* warpSize,
     const char** name,
     size_t* memory)
@@ -689,25 +689,25 @@ spmv_fp64_status_t spmv_fp64_get_device_info(
     cudaDeviceProp prop;
     cudaError_t err = cudaGetDeviceProperties(&prop, 0);
     if (err != cudaSuccess) {
-        return SPMV_FP64_ERROR_CUDA;
+        return SPMV_FP32_ERROR_CUDA;
     }
 
     if (warpSize) *warpSize = prop.warpSize;
     if (name) *name = prop.name;
     if (memory) *memory = prop.totalGlobalMem;
 
-    return SPMV_FP64_SUCCESS;
+    return SPMV_FP32_SUCCESS;
 }
 
-spmv_fp64_status_t spmv_fp64_get_theoretical_bandwidth(double* bandwidth) {
+spmv_fp32_status_t spmv_fp32_get_theoretical_bandwidth(double* bandwidth) {
     if (!bandwidth) {
-        return SPMV_FP64_ERROR_INVALID_INPUT;
+        return SPMV_FP32_ERROR_INVALID_INPUT;
     }
 
     cudaDeviceProp prop;
     cudaError_t err = cudaGetDeviceProperties(&prop, 0);
     if (err != cudaSuccess) {
-        return SPMV_FP64_ERROR_CUDA;
+        return SPMV_FP32_ERROR_CUDA;
     }
 
     // Theoretical bandwidth based on known GPU specifications
@@ -724,47 +724,47 @@ spmv_fp64_status_t spmv_fp64_get_theoretical_bandwidth(double* bandwidth) {
         *bandwidth = 1843.2;
     }
 
-    return SPMV_FP64_SUCCESS;
+    return SPMV_FP32_SUCCESS;
 }
 
 // ==================== Device-pointer Execution API ====================
 
-spmv_fp64_status_t spmv_fp64_execute_device(
-    spmv_fp64_matrix_handle_t handle,
-    const double* d_x,
-    double* d_y,
-    const spmv_fp64_opts_t* opts,
-    spmv_fp64_stats_t* stats)
+spmv_fp32_status_t spmv_fp32_execute_device(
+    spmv_fp32_matrix_handle_t handle,
+    const float* d_x,
+    float* d_y,
+    const spmv_fp32_opts_t* opts,
+    spmv_fp32_stats_t* stats)
 {
-    return spmv_fp64_execute_device_general(handle, 1.0, 0.0, d_x, d_y, opts, stats);
+    return spmv_fp32_execute_device_general(handle, 1.0f, 0.0f, d_x, d_y, opts, stats);
 }
 
-spmv_fp64_status_t spmv_fp64_execute_device_general(
-    spmv_fp64_matrix_handle_t handle,
-    double alpha,
-    double beta,
-    const double* d_x,
-    double* d_y,
-    const spmv_fp64_opts_t* opts,
-    spmv_fp64_stats_t* stats)
+spmv_fp32_status_t spmv_fp32_execute_device_general(
+    spmv_fp32_matrix_handle_t handle,
+    float alpha,
+    float beta,
+    const float* d_x,
+    float* d_y,
+    const spmv_fp32_opts_t* opts,
+    spmv_fp32_stats_t* stats)
 {
     if (!handle || !d_x || !d_y) {
-        return SPMV_FP64_ERROR_INVALID_INPUT;
+        return SPMV_FP32_ERROR_INVALID_INPUT;
     }
 
     // Use provided options or matrix default
-    spmv_fp64_opts_t execOpts = opts ? *opts : handle->opts;
+    spmv_fp32_opts_t execOpts = opts ? *opts : handle->opts;
     cudaStream_t stream = execOpts.stream ? execOpts.stream : 0;
 
     // Allocate temporary buffer for y result if beta != 0
-    double* d_y_temp = d_y;
-    bool needTempBuffer = (beta != 0.0);
-    double* d_y_result = NULL;
+    float* d_y_temp = d_y;
+    bool needTempBuffer = (beta != 0.0f);
+    float* d_y_result = NULL;
 
     if (needTempBuffer) {
-        cudaError_t err = cudaMalloc(&d_y_result, handle->numRows * sizeof(double));
+        cudaError_t err = cudaMalloc(&d_y_result, handle->numRows * sizeof(float));
         if (err != cudaSuccess) {
-            return SPMV_FP64_ERROR_CUDA;
+            return SPMV_FP32_ERROR_CUDA;
         }
         d_y_temp = d_y_result;
     }
@@ -772,7 +772,7 @@ spmv_fp64_status_t spmv_fp64_execute_device_general(
     // Launch optimal kernel based on warp size
     if (handle->warpSize == 64) {
         // Mars X201: Use adaptive TPR kernel based on avgNnz
-        spmv_fp64_impl::launch_mars_adaptive(
+        spmv_fp32_impl::launch_mars_adaptive(
             handle->numRows,
             handle->nnz,
             handle->d_rowPtr,
@@ -783,7 +783,7 @@ spmv_fp64_status_t spmv_fp64_execute_device_general(
             stream);
     } else {
         // NVIDIA: Use __ldg kernel
-        spmv_fp64_impl::launch_nvidia_optimal(
+        spmv_fp32_impl::launch_nvidia_optimal(
             handle->numRows,
             handle->d_rowPtr,
             handle->d_colIdx,
@@ -797,13 +797,11 @@ spmv_fp64_status_t spmv_fp64_execute_device_general(
     if (needTempBuffer) {
         // y = alpha * y_temp + beta * y_old
         // For simplicity, we do: y = alpha * y_temp (beta handling requires additional kernel)
-        // Note: Full beta support would need a separate vector blend kernel
-        cudaMemcpyAsync(d_y, d_y_temp, handle->numRows * sizeof(double),
+        cudaMemcpyAsync(d_y, d_y_temp, handle->numRows * sizeof(float),
                         cudaMemcpyDeviceToDevice, stream);
         cudaFree(d_y_result);
-    } else if (alpha != 1.0) {
+    } else if (alpha != 1.0f) {
         // For alpha scaling, would need separate kernel - simplified here
-        // Full implementation would use cublas or custom kernel
     }
 
     // Synchronize if requested
@@ -818,7 +816,7 @@ spmv_fp64_status_t spmv_fp64_execute_device_general(
         auto start = std::chrono::high_resolution_clock::now();
         for (int i = 0; i < iterations; i++) {
             if (handle->warpSize == 64) {
-                spmv_fp64_impl::launch_mars_adaptive(
+                spmv_fp32_impl::launch_mars_adaptive(
                     handle->numRows,
                     handle->nnz,
                     handle->d_rowPtr,
@@ -828,7 +826,7 @@ spmv_fp64_status_t spmv_fp64_execute_device_general(
                     d_y,
                     stream);
             } else {
-                spmv_fp64_impl::launch_nvidia_optimal(
+                spmv_fp32_impl::launch_nvidia_optimal(
                     handle->numRows,
                     handle->d_rowPtr,
                     handle->d_colIdx,
@@ -844,7 +842,7 @@ spmv_fp64_status_t spmv_fp64_execute_device_general(
         double timeMs = std::chrono::duration<double>(end - start).count() * 1000 / iterations;
 
         stats->kernel_time_ms = timeMs;
-        stats->bandwidth_gbps = spmv_fp64_impl::calculate_bandwidth(
+        stats->bandwidth_gbps = spmv_fp32_impl::calculate_bandwidth(
             handle->nnz, handle->numRows, timeMs);
         stats->theoretical_bw = handle->theoreticalBW;
         stats->utilization_pct = (stats->bandwidth_gbps / stats->theoretical_bw) * 100.0;
@@ -854,37 +852,37 @@ spmv_fp64_status_t spmv_fp64_execute_device_general(
         stats->gpu_name = handle->gpuName;
     }
 
-    return SPMV_FP64_SUCCESS;
+    return SPMV_FP32_SUCCESS;
 }
 
-spmv_fp64_status_t spmv_fp64_execute_direct(
+spmv_fp32_status_t spmv_fp32_execute_direct(
     int numRows,
     int nnz,
     const int* d_rowPtr,
     const int* d_colIdx,
-    const double* d_values,
-    const double* d_x,
-    double* d_y,
+    const float* d_values,
+    const float* d_x,
+    float* d_y,
     cudaStream_t stream)
 {
     // License check
     if (!check_license_internal()) {
-        return SPMV_FP64_ERROR_LICENSE_EXPIRED;
+        return SPMV_FP32_ERROR_LICENSE_EXPIRED;
     }
 
     if (!d_rowPtr || !d_colIdx || !d_values || !d_x || !d_y) {
-        return SPMV_FP64_ERROR_INVALID_INPUT;
+        return SPMV_FP32_ERROR_INVALID_INPUT;
     }
 
     if (numRows <= 0 || nnz < 0) {
-        return SPMV_FP64_ERROR_INVALID_INPUT;
+        return SPMV_FP32_ERROR_INVALID_INPUT;
     }
 
     // Detect GPU warp size
     cudaDeviceProp prop;
     cudaError_t err = cudaGetDeviceProperties(&prop, 0);
     if (err != cudaSuccess) {
-        return SPMV_FP64_ERROR_CUDA;
+        return SPMV_FP32_ERROR_CUDA;
     }
 
     int warpSize = prop.warpSize;
@@ -892,153 +890,153 @@ spmv_fp64_status_t spmv_fp64_execute_direct(
     // Launch optimal kernel based on warp size
     if (warpSize == 64) {
         // Mars X201: Use adaptive TPR kernel based on avgNnz
-        spmv_fp64_impl::launch_mars_adaptive(
+        spmv_fp32_impl::launch_mars_adaptive(
             numRows, nnz, d_rowPtr, d_colIdx, d_values, d_x, d_y, stream);
     } else {
         // NVIDIA: Use __ldg kernel
-        spmv_fp64_impl::launch_nvidia_optimal(
+        spmv_fp32_impl::launch_nvidia_optimal(
             numRows, d_rowPtr, d_colIdx, d_values, d_x, d_y, stream);
     }
 
-    return SPMV_FP64_SUCCESS;
+    return SPMV_FP32_SUCCESS;
 }
 
-spmv_fp64_status_t spmv_fp64_execute_direct_scaled(
-    double alpha,
+spmv_fp32_status_t spmv_fp32_execute_direct_scaled(
+    float alpha,
     int numRows,
     int nnz,
     const int* d_rowPtr,
     const int* d_colIdx,
-    const double* d_values,
-    const double* d_x,
-    double* d_y,
+    const float* d_values,
+    const float* d_x,
+    float* d_y,
     cudaStream_t stream)
 {
     if (!d_rowPtr || !d_colIdx || !d_values || !d_x || !d_y) {
-        return SPMV_FP64_ERROR_INVALID_INPUT;
+        return SPMV_FP32_ERROR_INVALID_INPUT;
     }
 
     if (numRows <= 0 || nnz < 0) {
-        return SPMV_FP64_ERROR_INVALID_INPUT;
+        return SPMV_FP32_ERROR_INVALID_INPUT;
     }
 
     // Detect GPU warp size
     cudaDeviceProp prop;
     cudaError_t err = cudaGetDeviceProperties(&prop, 0);
     if (err != cudaSuccess) {
-        return SPMV_FP64_ERROR_CUDA;
+        return SPMV_FP32_ERROR_CUDA;
     }
 
     int warpSize = prop.warpSize;
 
     // Launch optimal kernel based on warp size
     if (warpSize == 64) {
-        spmv_fp64_impl::launch_mars_adaptive(
+        spmv_fp32_impl::launch_mars_adaptive(
             numRows, nnz, d_rowPtr, d_colIdx, d_values, d_x, d_y, stream);
     } else {
-        spmv_fp64_impl::launch_nvidia_optimal(
+        spmv_fp32_impl::launch_nvidia_optimal(
             numRows, d_rowPtr, d_colIdx, d_values, d_x, d_y, stream);
     }
 
     // Apply alpha scaling if needed
-    if (alpha != 1.0) {
-        spmv_fp64_impl::launch_scale(numRows, alpha, d_y, stream);
+    if (alpha != 1.0f) {
+        spmv_fp32_impl::launch_scale(numRows, alpha, d_y, stream);
     }
 
-    return SPMV_FP64_SUCCESS;
+    return SPMV_FP32_SUCCESS;
 }
 
-spmv_fp64_status_t spmv_fp64_execute_direct_general(
-    double alpha,
-    double beta,
+spmv_fp32_status_t spmv_fp32_execute_direct_general(
+    float alpha,
+    float beta,
     int numRows,
     int nnz,
     const int* d_rowPtr,
     const int* d_colIdx,
-    const double* d_values,
-    const double* d_x,
-    double* d_y,
+    const float* d_values,
+    const float* d_x,
+    float* d_y,
     cudaStream_t stream)
 {
     if (!d_rowPtr || !d_colIdx || !d_values || !d_x || !d_y) {
-        return SPMV_FP64_ERROR_INVALID_INPUT;
+        return SPMV_FP32_ERROR_INVALID_INPUT;
     }
 
     if (numRows <= 0 || nnz < 0) {
-        return SPMV_FP64_ERROR_INVALID_INPUT;
+        return SPMV_FP32_ERROR_INVALID_INPUT;
     }
 
     // Detect GPU warp size
     cudaDeviceProp prop;
     cudaError_t err = cudaGetDeviceProperties(&prop, 0);
     if (err != cudaSuccess) {
-        return SPMV_FP64_ERROR_CUDA;
+        return SPMV_FP32_ERROR_CUDA;
     }
 
     int warpSize = prop.warpSize;
 
     // Special case: beta = 0 (simple scaled version)
-    if (beta == 0.0) {
+    if (beta == 0.0f) {
         if (warpSize == 64) {
-            spmv_fp64_impl::launch_mars_adaptive(
+            spmv_fp32_impl::launch_mars_adaptive(
                 numRows, nnz, d_rowPtr, d_colIdx, d_values, d_x, d_y, stream);
         } else {
-            spmv_fp64_impl::launch_nvidia_optimal(
+            spmv_fp32_impl::launch_nvidia_optimal(
                 numRows, d_rowPtr, d_colIdx, d_values, d_x, d_y, stream);
         }
 
-        if (alpha != 1.0) {
-            spmv_fp64_impl::launch_scale(numRows, alpha, d_y, stream);
+        if (alpha != 1.0f) {
+            spmv_fp32_impl::launch_scale(numRows, alpha, d_y, stream);
         }
-        return SPMV_FP64_SUCCESS;
+        return SPMV_FP32_SUCCESS;
     }
 
     // General case: beta != 0, need temporary buffer
-    double* d_temp = NULL;
-    err = cudaMalloc(&d_temp, numRows * sizeof(double));
+    float* d_temp = NULL;
+    err = cudaMalloc(&d_temp, numRows * sizeof(float));
     if (err != cudaSuccess) {
-        return SPMV_FP64_ERROR_MEMORY;
+        return SPMV_FP32_ERROR_MEMORY;
     }
 
     // Compute A*x into temp buffer
     if (warpSize == 64) {
-        spmv_fp64_impl::launch_mars_adaptive(
+        spmv_fp32_impl::launch_mars_adaptive(
             numRows, nnz, d_rowPtr, d_colIdx, d_values, d_x, d_temp, stream);
     } else {
-        spmv_fp64_impl::launch_nvidia_optimal(
+        spmv_fp32_impl::launch_nvidia_optimal(
             numRows, d_rowPtr, d_colIdx, d_values, d_x, d_temp, stream);
     }
 
     // Blend: y = alpha * temp + beta * y
-    spmv_fp64_impl::launch_blend(numRows, alpha, beta, d_temp, d_y, stream);
+    spmv_fp32_impl::launch_blend(numRows, alpha, beta, d_temp, d_y, stream);
 
     // Free temporary buffer
     cudaFree(d_temp);
 
-    return SPMV_FP64_SUCCESS;
+    return SPMV_FP32_SUCCESS;
 }
 
-const char* spmv_fp64_get_error_string(spmv_fp64_status_t status) {
+const char* spmv_fp32_get_error_string(spmv_fp32_status_t status) {
     switch (status) {
-        case SPMV_FP64_SUCCESS:
+        case SPMV_FP32_SUCCESS:
             return "Success";
-        case SPMV_FP64_ERROR_INVALID_INPUT:
+        case SPMV_FP32_ERROR_INVALID_INPUT:
             return "Invalid input parameters";
-        case SPMV_FP64_ERROR_MEMORY:
+        case SPMV_FP32_ERROR_MEMORY:
             return "Memory allocation/deallocation error";
-        case SPMV_FP64_ERROR_CUDA:
+        case SPMV_FP32_ERROR_CUDA:
             return "CUDA runtime error";
-        case SPMV_FP64_ERROR_NOT_SUPPORTED:
+        case SPMV_FP32_ERROR_NOT_SUPPORTED:
             return "Feature not supported on this GPU";
-        case SPMV_FP64_ERROR_INTERNAL:
+        case SPMV_FP32_ERROR_INTERNAL:
             return "Internal library error";
-        case SPMV_FP64_ERROR_LICENSE_EXPIRED:
+        case SPMV_FP32_ERROR_LICENSE_EXPIRED:
             return "License expired - please contact vendor for renewal";
         default:
             return "Unknown error";
     }
 }
 
-const char* spmv_fp64_get_version(void) {
-    return SPMV_FP64_VERSION_STRING;
+const char* spmv_fp32_get_version(void) {
+    return SPMV_FP32_VERSION_STRING;
 }

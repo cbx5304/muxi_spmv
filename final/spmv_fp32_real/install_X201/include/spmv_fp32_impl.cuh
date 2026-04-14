@@ -1,6 +1,6 @@
 /**
- * @file spmv_fp64_impl.cuh
- * @brief Internal kernel implementations for FP64 SpMV
+ * @file spmv_fp32_impl.cuh
+ * @brief Internal kernel implementations for FP32 SpMV
  *
  * This file contains:
  * 1. Warp reduction utilities
@@ -8,17 +8,17 @@
  * 3. Device-level SpMV functions (for user kernel integration)
  */
 
-#ifndef SPMV_FP64_IMPL_CUH_
-#define SPMV_FP64_IMPL_CUH_
+#ifndef SPMV_FP32_IMPL_CUH_
+#define SPMV_FP32_IMPL_CUH_
 
 #include <cuda_runtime.h>
 
-namespace spmv_fp64_impl {
+namespace spmv_fp32_impl {
 
 // ==================== Warp Reduction ====================
 
 template<int WarpSize>
-__device__ __forceinline__ double warpReduceSum(double val) {
+__device__ __forceinline__ float warpReduceSum(float val) {
     if (WarpSize >= 64) {
         val += __shfl_down_sync(0xffffffffffffffffULL, val, 32);
     }
@@ -49,17 +49,17 @@ __device__ __forceinline__ double warpReduceSum(double val) {
  * @param x          Input vector
  * @return Partial sum for this row (needs warp reduction if used by multiple threads)
  */
-__device__ double compute_row_ldg_partial(
+__device__ float compute_row_ldg_partial(
     int row,
     const int* __restrict__ rowPtr,
     const int* __restrict__ colIdx,
-    const double* __restrict__ values,
-    const double* __restrict__ x)
+    const float* __restrict__ values,
+    const float* __restrict__ x)
 {
     int rowStart = __ldg(&rowPtr[row]);
     int rowEnd = __ldg(&rowPtr[row + 1]);
 
-    double sum = 0.0;
+    float sum = 0.0f;
     // Single thread processes entire row
     for (int i = rowStart; i < rowEnd; i++) {
         int col = __ldg(&colIdx[i]);
@@ -83,18 +83,18 @@ __device__ double compute_row_ldg_partial(
  * @return Full row sum (only valid for lane==0, others return 0)
  */
 template<int WarpSize = 32>
-__device__ double compute_row_ldg_cooperative(
+__device__ float compute_row_ldg_cooperative(
     int row,
     int lane,
     const int* __restrict__ rowPtr,
     const int* __restrict__ colIdx,
-    const double* __restrict__ values,
-    const double* __restrict__ x)
+    const float* __restrict__ values,
+    const float* __restrict__ x)
 {
     int rowStart = __ldg(&rowPtr[row]);
     int rowEnd = __ldg(&rowPtr[row + 1]);
 
-    double sum = 0.0;
+    float sum = 0.0f;
     for (int i = rowStart + lane; i < rowEnd; i += WarpSize) {
         int col = __ldg(&colIdx[i]);
         sum += __ldg(&values[i]) * __ldg(&x[col]);
@@ -109,18 +109,18 @@ __device__ double compute_row_ldg_cooperative(
  * @brief Compute row with alpha/beta support (NVIDIA __ldg)
  */
 template<int WarpSize = 32>
-__device__ double compute_row_ldg_general(
+__device__ float compute_row_ldg_general(
     int row,
     int lane,
-    double alpha,
-    double beta,
+    float alpha,
+    float beta,
     const int* __restrict__ rowPtr,
     const int* __restrict__ colIdx,
-    const double* __restrict__ values,
-    const double* __restrict__ x,
-    double y_old)
+    const float* __restrict__ values,
+    const float* __restrict__ x,
+    float y_old)
 {
-    double spmv_result = compute_row_ldg_cooperative<WarpSize>(
+    float spmv_result = compute_row_ldg_cooperative<WarpSize>(
         row, lane, rowPtr, colIdx, values, x);
     return alpha * spmv_result + beta * y_old;
 }
@@ -145,18 +145,18 @@ __device__ double compute_row_ldg_general(
  * @return Full row sum (only valid for threadInRow==0, others return partial)
  */
 template<int WarpSize = 64, int TPR = 8>
-__device__ double compute_row_tpr(
+__device__ float compute_row_tpr(
     int row,
     int threadInRow,
     const int* __restrict__ rowPtr,
     const int* __restrict__ colIdx,
-    const double* __restrict__ values,
-    const double* __restrict__ x)
+    const float* __restrict__ values,
+    const float* __restrict__ x)
 {
     int rowStart = rowPtr[row];
     int rowEnd = rowPtr[row + 1];
 
-    double sum = 0.0;
+    float sum = 0.0f;
     for (int i = rowStart + threadInRow; i < rowEnd; i += TPR) {
         sum += values[i] * x[colIdx[i]];
     }
@@ -180,18 +180,18 @@ __device__ double compute_row_tpr(
  * @brief Compute row with alpha/beta support (Mars TPR)
  */
 template<int WarpSize = 64, int TPR = 8>
-__device__ double compute_row_tpr_general(
+__device__ float compute_row_tpr_general(
     int row,
     int threadInRow,
-    double alpha,
-    double beta,
+    float alpha,
+    float beta,
     const int* __restrict__ rowPtr,
     const int* __restrict__ colIdx,
-    const double* __restrict__ values,
-    const double* __restrict__ x,
-    double y_old)
+    const float* __restrict__ values,
+    const float* __restrict__ x,
+    float y_old)
 {
-    double spmv_result = compute_row_tpr<WarpSize, TPR>(
+    float spmv_result = compute_row_tpr<WarpSize, TPR>(
         row, threadInRow, rowPtr, colIdx, values, x);
     return alpha * spmv_result + beta * y_old;
 }
@@ -206,13 +206,13 @@ __device__ double compute_row_tpr_general(
  * - WarpSize=64: Uses TPR=8 optimization
  */
 template<int WarpSize>
-__device__ double compute_row_auto(
+__device__ float compute_row_auto(
     int row,
     int lane,
     const int* __restrict__ rowPtr,
     const int* __restrict__ colIdx,
-    const double* __restrict__ values,
-    const double* __restrict__ x)
+    const float* __restrict__ values,
+    const float* __restrict__ x)
 {
     if (WarpSize == 32) {
         return compute_row_ldg_cooperative<32>(row, lane, rowPtr, colIdx, values, x);
@@ -224,16 +224,16 @@ __device__ double compute_row_auto(
 }
 
 template<int WarpSize>
-__device__ double compute_row_auto_general(
+__device__ float compute_row_auto_general(
     int row,
     int lane,
-    double alpha,
-    double beta,
+    float alpha,
+    float beta,
     const int* __restrict__ rowPtr,
     const int* __restrict__ colIdx,
-    const double* __restrict__ values,
-    const double* __restrict__ x,
-    double y_old)
+    const float* __restrict__ values,
+    const float* __restrict__ x,
+    float y_old)
 {
     if (WarpSize == 32) {
         return compute_row_ldg_general<32>(row, lane, alpha, beta,
@@ -254,9 +254,9 @@ __global__ void tpr_kernel(
     int numRows,
     const int* __restrict__ rowPtr,
     const int* __restrict__ colIdx,
-    const double* __restrict__ values,
-    const double* __restrict__ x,
-    double* __restrict__ y)
+    const float* __restrict__ values,
+    const float* __restrict__ x,
+    float* __restrict__ y)
 {
     int rowsPerWarp = WarpSize / TPR;
     int warpId = blockIdx.x * (blockDim.x / WarpSize) + (threadIdx.x / WarpSize);
@@ -268,7 +268,7 @@ __global__ void tpr_kernel(
         int rowStart = rowPtr[row];
         int rowEnd = rowPtr[row + 1];
 
-        double sum = 0.0;
+        float sum = 0.0f;
         for (int i = rowStart + threadInRow; i < rowEnd; i += TPR) {
             sum += values[i] * x[colIdx[i]];
         }
@@ -301,9 +301,9 @@ __global__ void ldg_kernel(
     int numRows,
     const int* __restrict__ rowPtr,
     const int* __restrict__ colIdx,
-    const double* __restrict__ values,
-    const double* __restrict__ x,
-    double* __restrict__ y)
+    const float* __restrict__ values,
+    const float* __restrict__ x,
+    float* __restrict__ y)
 {
     int row = blockIdx.x * (blockDim.x / WarpSize) + (threadIdx.x / WarpSize);
     int lane = threadIdx.x % WarpSize;
@@ -312,7 +312,7 @@ __global__ void ldg_kernel(
         int rowStart = __ldg(&rowPtr[row]);
         int rowEnd = __ldg(&rowPtr[row + 1]);
 
-        double sum = 0.0;
+        float sum = 0.0f;
         for (int i = rowStart + lane; i < rowEnd; i += WarpSize) {
             int col = __ldg(&colIdx[i]);
             sum += __ldg(&values[i]) * __ldg(&x[col]);
@@ -341,9 +341,9 @@ inline void launch_mars_adaptive(
     int nnz,  // Used to calculate avgNnz
     const int* d_rowPtr,
     const int* d_colIdx,
-    const double* d_values,
-    const double* d_x,
-    double* d_y,
+    const float* d_values,
+    const float* d_x,
+    float* d_y,
     cudaStream_t stream = 0)
 {
     const int WarpSize = 64;
@@ -406,9 +406,9 @@ inline void launch_mars_optimal(
     int numRows,
     const int* d_rowPtr,
     const int* d_colIdx,
-    const double* d_values,
-    const double* d_x,
-    double* d_y,
+    const float* d_values,
+    const float* d_x,
+    float* d_y,
     cudaStream_t stream = 0)
 {
     const int WarpSize = 64;
@@ -429,9 +429,9 @@ inline void launch_nvidia_optimal(
     int numRows,
     const int* d_rowPtr,
     const int* d_colIdx,
-    const double* d_values,
-    const double* d_x,
-    double* d_y,
+    const float* d_values,
+    const float* d_x,
+    float* d_y,
     cudaStream_t stream = 0)
 {
     const int WarpSize = 32;
@@ -449,9 +449,9 @@ inline void launch_nvidia_optimal(
 // ==================== Bandwidth Calculation ====================
 
 inline double calculate_bandwidth(int nnz, int numRows, double time_ms) {
-    // FP64 SpMV: values(8B) + colIdx(4B) + x(col)(8B) per nnz
-    // Plus y output: numRows * 8B
-    double bytes = (double)nnz * 20.0 + (double)numRows * 8.0;
+    // FP32 SpMV: values(4B) + colIdx(4B) + x(col)(4B) per nnz
+    // Plus y output: numRows * 4B
+    double bytes = (double)nnz * 12.0 + (double)numRows * 4.0;
     return bytes / (time_ms * 1e6);  // GB/s
 }
 
@@ -460,8 +460,8 @@ inline double calculate_bandwidth(int nnz, int numRows, double time_ms) {
 // Scale vector: y[i] = alpha * y[i]
 __global__ void scale_kernel(
     int n,
-    double alpha,
-    double* __restrict__ y)
+    float alpha,
+    float* __restrict__ y)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) {
@@ -472,10 +472,10 @@ __global__ void scale_kernel(
 // Blend vectors: y[i] = alpha * temp[i] + beta * y[i]
 __global__ void blend_kernel(
     int n,
-    double alpha,
-    double beta,
-    const double* __restrict__ temp,
-    double* __restrict__ y)
+    float alpha,
+    float beta,
+    const float* __restrict__ temp,
+    float* __restrict__ y)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) {
@@ -485,8 +485,8 @@ __global__ void blend_kernel(
 
 inline void launch_scale(
     int n,
-    double alpha,
-    double* d_y,
+    float alpha,
+    float* d_y,
     cudaStream_t stream = 0)
 {
     const int blockSize = 256;
@@ -496,10 +496,10 @@ inline void launch_scale(
 
 inline void launch_blend(
     int n,
-    double alpha,
-    double beta,
-    const double* d_temp,
-    double* d_y,
+    float alpha,
+    float beta,
+    const float* d_temp,
+    float* d_y,
     cudaStream_t stream = 0)
 {
     const int blockSize = 256;
@@ -507,6 +507,6 @@ inline void launch_blend(
     blend_kernel<<<gridSize, blockSize, 0, stream>>>(n, alpha, beta, d_temp, d_y);
 }
 
-} // namespace spmv_fp64_impl
+} // namespace spmv_fp32_impl
 
-#endif /* SPMV_FP64_IMPL_CUH_ */
+#endif /* SPMV_FP32_IMPL_CUH_ */

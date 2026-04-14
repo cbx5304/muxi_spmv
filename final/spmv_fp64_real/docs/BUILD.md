@@ -136,6 +136,48 @@ sudo cp include/spmv_fp64.h /usr/local/include/
 sudo ldconfig
 ```
 
+## Testing New API Interfaces ⭐ NEW
+
+The library provides three API modes:
+
+1. **Host CSR Mode** - Library manages all memory (original API)
+2. **Device CSR Mode** - User provides device CSR pointers (zero-copy)
+3. **Direct Execution** - One-shot execution without handle
+
+### Test All APIs
+
+```bash
+# Build test program
+nvcc -O3 -arch=sm_89 -I./include -I./src -o build/test_new_api examples/test_new_api.cu build/libspmv_fp64.so
+
+# Run test
+LD_LIBRARY_PATH=build:$LD_LIBRARY_PATH ./build/test_new_api
+```
+
+Expected output:
+```
+=== Test 1: Host CSR API === PASSED
+=== Test 2: Device CSR API === PASSED
+=== Test 3: Direct Execution API === PASSED
+=== Test 4: Error Handling === PASSED
+=== All Tests Complete ===
+```
+
+### Mars X201 Testing
+
+```bash
+# SSH to Mars server
+ssh -p 19936 chenbinxiangc@172.16.45.81
+cd ~/spmv_muxi/final/spmv_fp64_real
+
+# Build with pre_make
+export PATH=/opt/hpcc/tools/cu-bridge/tools:$PATH
+pre_make nvcc -O3 -I./include -I./src -o build/test_new_api examples/test_new_api.cu build/libspmv_fp64.so
+
+# Run with GPU7
+CUDA_VISIBLE_DEVICES=7 LD_LIBRARY_PATH=build:$LD_LIBRARY_PATH ./build/test_new_api
+```
+
 ## Using in Your Project
 
 After installation:
